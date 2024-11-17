@@ -64,6 +64,10 @@ Lastly, methods for learning from very sparse rewards or using human feedback as
 
 # Hierarchical RL 
 
+* To do:
+	* Hierarchical Actor-Critic
+ 	* Double Actor-Critic
+  	* Interest Option-Critic
 
 # Imitation Learning & Human Feedback
 
