@@ -113,20 +113,24 @@ class VPGTrainer:
                      DeltaLossV=(loss_val - loss_val_old).item())
 
 
-    def train_mod(self, env_fn, ac=MLPActorCritic, ac_kwargs=dict(), seed=100, 
-                  buf_size=4000, max_ep_len=1000, num_epochs=50, gamma=0.99, 
+    def train_mod(self, env_fn, model_path='', ac=MLPActorCritic, ac_kwargs=dict(), 
+                  seed=100, buf_size=4000, max_ep_len=1000, num_epochs=50, gamma=0.99, 
                   lam=0.97, pi_lr=3e-4, val_lr=1e-3, train_v_iters=80, 
-                  save_freq=10, logger_kwargs=dict()):
+                  logger_kwargs=dict(), save_freq=10, checkpoint_freq=20):
         setup_pytorch_for_mpi()
-        if num_procs() > 1:
-            seed = seed * proc_id()    
+        
+        logger = EpochLogger(**logger_kwargs)
+        logger.save_config(locals())
+        
+        seed += 10000 * proc_id()    
         np.random.seed(seed)
         torch.manual_seed(seed)
         
         env = env_fn()
-        ac_mod = ac(env, **ac_kwargs)
-        logger = EpochLogger(**logger_kwargs)
-        logger.save_config(locals())
+        if len(model_path) > 0:
+            ac_mod = torch.load(model_path)
+        else:
+            ac_mod = ac(env, **ac_kwargs)
 
         local_buf_size = buf_size//num_procs()
         buf = VPGBuffer(env, local_buf_size, num_epochs, 
@@ -138,7 +142,7 @@ class VPGTrainer:
         logger.setup_pytorch_saver(ac_mod)
 
         obs = env.reset()
-        ep_len, ep_ret, log_itr = 0, 0, 0
+        ep_len, ep_ret = 0, 0
         start_time = time.time()
 
         for epoch in range(num_epochs):
@@ -162,8 +166,8 @@ class VPGTrainer:
             
             if (epoch % save_freq) == 0:
                 logger.save_state({'env': env})
-                log_itr += 1
-                print(f'Model {epoch} saved successfully')
+            if ((epoch + 1) % checkpoint_freq) == 0:
+                logger.save_state({'env': env}, itr=epoch+1)
                 
             self.__update_params(train_v_iters, ac_mod, pi_optim, val_optim, 
                                  logger, buf)
@@ -192,6 +196,7 @@ if __name__ == '__main__':
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument('--env', type=str, default='HalfCheetah-v2')
+    parser.add_argument('--model_path', type=str, default='')
     parser.add_argument('--hid_act', type=int, default=64)
     parser.add_argument('--hid_cri', type=int, default=64)
     parser.add_argument('--l', type=int, default=2)
@@ -203,23 +208,28 @@ if __name__ == '__main__':
     parser.add_argument('--cpu', type=int, default=4)
     parser.add_argument('--steps', type=int, default=4000)
     parser.add_argument('--ep_max_len', type=int, default=1000)
-    parser.add_argument('--epochs', type=int, default=50)
+    parser.add_argument('--epochs', type=int, default=100)
     parser.add_argument('--save_freq', type=int, default=10)
+    parser.add_argument('--checkpoint_freq', type=int, default=20)
     parser.add_argument('--exp_name', type=str, default='vpg_custom')
     args = parser.parse_args()
 
     mpi_fork(args.cpu)  # run parallel code with mpi
     
     from spinup.utils.run_utils import setup_logger_kwargs
-    logger_kwargs = setup_logger_kwargs(args.exp_name, 
-                                        data_dir='/home/sherif/user/python/DRL/data/vpg')
+    data_dir = '/home/sherif/user/python/DeepRL/data/vpg/' + args.env + '/' 
+    logger_kwargs = setup_logger_kwargs(args.exp_name, data_dir=data_dir, seed=args.seed)
+
     ac_kwargs = dict(hidden_sizes_actor=[args.hid_act]*args.l, 
                     hidden_sizes_critic=[args.hid_cri]*args.l,
                     hidden_acts_actor=torch.nn.Tanh, 
                     hidden_acts_critic=torch.nn.Tanh)
 
     trainer = VPGTrainer()
-    trainer.train_mod(lambda : gym.make(args.env), ac=MLPActorCritic, ac_kwargs=ac_kwargs, 
-                    seed=args.seed, buf_size=args.steps, max_ep_len=args.ep_max_len, 
-                    num_epochs=args.epochs, gamma=args.gamma, lam=args.lam, pi_lr=args.pi_lr, 
-                    val_lr=args.val_lr, save_freq=args.save_freq, logger_kwargs=logger_kwargs)
+    trainer.train_mod(lambda : gym.make(args.env), model_path=args.model_path, 
+                      ac=MLPActorCritic, ac_kwargs=ac_kwargs, seed=args.seed, 
+                      buf_size=args.steps, max_ep_len=args.ep_max_len, 
+                      num_epochs=args.epochs, gamma=args.gamma, lam=args.lam, 
+                      pi_lr=args.pi_lr, val_lr=args.val_lr, 
+                      logger_kwargs=logger_kwargs, save_freq=args.save_freq, 
+                      checkpoint_freq=args.checkpoint_freq)

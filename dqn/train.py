@@ -170,15 +170,21 @@ class DQNTrainer:
         logger.store(LossQ=loss_q.item(),
                      DeltaLossQ=(loss_q_new - loss_q).item())
     
-    def train_mod(self, env_fn, dueling=True, double_q=True, q_net_kwargs=dict(), 
-                  seed=0, prioritized_replay=False, prioritized_replay_alpha=0.6,
-                  prioritized_replay_beta0=0.4, prioritized_replay_beta_rate=None, 
-                  prioritized_replay_eps=1e-6, eps_init=1.0, eps_final=0.05, 
-                  eps_decay_rate=0.2, buf_size=10000, steps_per_epoch=4000, 
-                  batch_size=32, epochs=100, max_ep_len=1000, learning_starts=1000, 
-                  train_freq=1, target_network_update_freq=500, 
-                  gamma=0.99, q_lr=5e-4, logger_kwargs=dict(), save_freq=10):
+    def train_mod(self, env_fn, model_path='', dueling=True, double_q=True, 
+                  q_net_kwargs=dict(), seed=0, prioritized_replay=False, 
+                  prioritized_replay_alpha=0.6, prioritized_replay_beta0=0.4, 
+                  prioritized_replay_beta_rate=None, prioritized_replay_eps=1e-6, 
+                  eps_init=1.0, eps_final=0.05, eps_decay_rate=0.2, buf_size=10000, 
+                  steps_per_epoch=4000, batch_size=32, epochs=100, max_ep_len=1000, 
+                  learning_starts=1000, train_freq=1, target_network_update_freq=500, 
+                  gamma=0.99, q_lr=5e-4, logger_kwargs=dict(), save_freq=10,
+                  checkpoint_freq=20):
         setup_pytorch_for_mpi()
+
+        # Initialize logger
+        logger = EpochLogger(**logger_kwargs)
+        logger.save_config(locals()) 
+
         local_buf_size = buf_size // num_procs()
         local_steps_per_epoch = steps_per_epoch // num_procs()
         local_learning_starts = learning_starts // num_procs()
@@ -198,11 +204,12 @@ class DQNTrainer:
         else:
             q_net = MLPDQN 
 
-        # Initialize environment, Q network and logger
+        # Initialize environment and Q network
         env = env_fn()
-        q_net_mod = q_net(env, eps_init, eps_final, eps_decay_rate, **q_net_kwargs)
-        logger = EpochLogger(**logger_kwargs)
-        logger.save_config(locals()) 
+        if len(model_path) > 0:
+            q_net_mod = torch.load(model_path)
+        else:
+            q_net_mod = q_net(env, eps_init, eps_final, eps_decay_rate, **q_net_kwargs)
 
         # Initialize the experience replay buffer for training
         if prioritized_replay==True:
@@ -213,7 +220,6 @@ class DQNTrainer:
                                           prioritized_replay_beta_rate, prioritized_replay_eps)
         else:
             buf = ReplayBuffer(env, local_buf_size, batch_size)
-            
 
         # Sync Q network parameters and initialize optimizers
         sync_params(q_net_mod)
@@ -258,6 +264,9 @@ class DQNTrainer:
 
             if (epoch % save_freq) == 0:
                 logger.save_state({'env': env})
+            if ((epoch + 1) % checkpoint_freq) == 0:
+                logger.save_state({'env': env}, itr=epoch+1)
+
             q_net_mod.update_eps_exp()
             buf.update_beta()
             
@@ -280,6 +289,7 @@ if __name__ == '__main__':
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument('--env', type=str, default='HalfCheetah-v2')
+    parser.add_argument('--model_path', type=str, default='')
     parser.add_argument('--hid', type=int, default=64)
     parser.add_argument('--l', type=int, default=2)
     parser.add_argument('--dueling', type=bool, default=True)
@@ -287,12 +297,12 @@ if __name__ == '__main__':
     parser.add_argument('--seed', '-s', type=int, default=0)
     parser.add_argument('--prioritized_replay', type=bool, default=False)
     parser.add_argument('--eps_init', type=float, default=1.0)
-    parser.add_argument('--eps_final', type=float, default=0.02)
+    parser.add_argument('--eps_final', type=float, default=0.1)
     parser.add_argument('--eps_decay_rate', type=float, default=0.2)
-    parser.add_argument('--buf_size', type=int, default=50000)
+    parser.add_argument('--buf_size', type=int, default=1000000)
     parser.add_argument('--steps', type=int, default=4000)
-    parser.add_argument('--batch_size', type=int, default=32)
-    parser.add_argument('--epochs', type=int, default=100)
+    parser.add_argument('--batch_size', type=int, default=100)
+    parser.add_argument('--epochs', type=int, default=100)  
     parser.add_argument('--max_ep_len', type=int, default=1000)
     parser.add_argument('--learning_starts', type=int, default=1000)
     parser.add_argument('--train_freq', type=int, default=1)
@@ -300,6 +310,7 @@ if __name__ == '__main__':
     parser.add_argument('--gamma', type=float, default=0.99)
     parser.add_argument('--q_lr', type=float, default=5e-4)
     parser.add_argument('--save_freq', type=int, default=10)
+    parser.add_argument('--checkpoint_freq', type=int, default=20)
     parser.add_argument('--exp_name', type=str, default='dqn_custom')
     parser.add_argument('--cpu', type=int, default=4)
     args = parser.parse_args()
@@ -309,21 +320,22 @@ if __name__ == '__main__':
 
     # Q network kwargs
     q_net_kwargs = dict(hidden_sizes=[args.hid]*args.l,
-                        hidden_acts=torch.nn.Tanh)
+                        hidden_acts=torch.nn.ReLU)
     
     # EpochLogger kwargs
-    data_dir = '/home/sherif/user/python/DRL/data/dqn'
+    data_dir = '/home/sherif/user/python/DeepRL/data/dqn/' + args.env + '/'
     logger_kwargs = setup_logger_kwargs(args.exp_name, data_dir=data_dir, seed=args.seed)
 
     # Begin training
     trainer = DQNTrainer()
-    trainer.train_mod(lambda : gym.make(args.env), dueling=args.dueling, double_q=args.double_q, 
-                      q_net_kwargs=q_net_kwargs, prioritized_replay=args.prioritized_replay, 
-                      seed=args.seed, eps_init=args.eps_init, eps_final=args.eps_final, 
+    trainer.train_mod(lambda : gym.make(args.env), model_path=args.model_path, dueling=args.dueling, 
+                      double_q=args.double_q, q_net_kwargs=q_net_kwargs, 
+                      prioritized_replay=args.prioritized_replay, seed=args.seed, 
+                      eps_init=args.eps_init, eps_final=args.eps_final, 
                       eps_decay_rate=args.eps_decay_rate, buf_size=args.buf_size, 
                       steps_per_epoch=args.steps, batch_size=args.batch_size,
                       epochs=args.epochs, max_ep_len=args.max_ep_len, 
                       learning_starts=args.learning_starts, train_freq=args.train_freq, 
                       target_network_update_freq=args.target_network_update_freq, 
                       gamma=args.gamma, q_lr=args.q_lr, logger_kwargs=logger_kwargs, 
-                      save_freq=args.save_freq)
+                      save_freq=args.save_freq, checkpoint_freq=args.checkpoint_freq)

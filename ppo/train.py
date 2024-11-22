@@ -152,28 +152,33 @@ class PPOTrainer:
                      KL=kl.item(),
                      DeltaLossV=(loss_val - loss_val_old).item())
     
-    def train_mod(self, env_fn, ac=MLPActorCritic, ac_kwargs=dict(), seed=0,
+    def train_mod(self, env_fn, model_path='', ac=MLPActorCritic, ac_kwargs=dict(), seed=0,
                   steps_per_epoch=4096, batch_size=512, epochs=50, gamma=0.99, 
                   clip_ratio=0.2, pi_lr=3e-4, vf_lr=1e-3, train_pi_iters=80, 
                   train_v_iters=80, lam=0.97, max_ep_len=1000, target_kl=0.01, 
-                  logger_kwargs=dict(), save_freq=10):
+                  logger_kwargs=dict(), save_freq=10, checkpoint_freq=20):
         setup_pytorch_for_mpi()
+
+        # Initialize logger
+        logger = EpochLogger(**logger_kwargs)
+        logger.save_config(locals()) 
+        
         local_steps_per_epoch = steps_per_epoch // num_procs()
-        local_batch_size = batch_size // num_procs()
 
         # Setup random seed number for PyTorch and NumPy
         seed += 10000 * proc_id()
         torch.manual_seed(seed=seed)
         np.random.seed(seed=seed)
 
-        # Initialize environment, actor-critic and logger
+        # Initialize environment and actor-critic
         env = env_fn()
-        ac_mod = ac(env, **ac_kwargs)
-        logger = EpochLogger(**logger_kwargs)
-        logger.save_config(locals()) 
+        if len(model_path) > 0:
+            ac_mod = torch.load(model_path)
+        else:
+            ac_mod = ac(env, **ac_kwargs)
 
         # Initialize the experience buffer for training
-        buf_mod = PPOBuffer(env, local_steps_per_epoch, local_batch_size,
+        buf_mod = PPOBuffer(env, local_steps_per_epoch, batch_size,
                             gamma, lam)
 
         # Sync AC parameters and initialize optimizers
@@ -211,6 +216,8 @@ class PPOTrainer:
             
             if (epoch % save_freq) == 0:
                 logger.save_state({'env': env})
+            if ((epoch + 1) % checkpoint_freq) == 0:
+                logger.save_state({'env': env}, itr=epoch+1)
                 
             self.__update_params(ac_mod, buf_mod, pi_optim, val_optim, logger,
                                  train_pi_iters, train_v_iters, clip_ratio, target_kl)
@@ -236,13 +243,14 @@ if __name__ == '__main__':
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument('--env', type=str, default='HalfCheetah-v2')
+    parser.add_argument('--model_path', type=str, default='')
     parser.add_argument('--hid_act', type=int, default=64)
     parser.add_argument('--hid_cri', type=int, default=64)
     parser.add_argument('--l', type=int, default=2)
     parser.add_argument('--seed', '-s', type=int, default=0)
     parser.add_argument('--steps', type=int, default=4096)
     parser.add_argument('--batch_size', type=int, default=512)
-    parser.add_argument('--epochs', type=int, default=50)
+    parser.add_argument('--epochs', type=int, default=100)
     parser.add_argument('--gamma', type=float, default=0.99)
     parser.add_argument('--clip_ratio', type=float, default=0.2)
     parser.add_argument('--pi_lr', type=float, default=3e-4)
@@ -253,6 +261,7 @@ if __name__ == '__main__':
     parser.add_argument('--max_ep_len', type=int, default=1000)
     parser.add_argument('--target_kl', type=float, default=0.01)
     parser.add_argument('--save_freq', type=int, default=10)
+    parser.add_argument('--checkpoint_freq', type=int, default=20)
     parser.add_argument('--exp_name', type=str, default='ppo_custom')
     parser.add_argument('--cpu', type=int, default=4)
     args = parser.parse_args()
@@ -267,14 +276,15 @@ if __name__ == '__main__':
                      hidden_acts_critic=torch.nn.Tanh)
     
     # EpochLogger kwargs
-    data_dir = '/home/sherif/user/python/DRL/data/ppo'
-    logger_kwargs = setup_logger_kwargs(args.exp_name, data_dir=data_dir)
+    data_dir = '/home/sherif/user/python/DeepRL/data/ppo/' + args.env + '/'
+    logger_kwargs = setup_logger_kwargs(args.exp_name, data_dir=data_dir, seed=args.seed)
 
     # Begin training
     trainer = PPOTrainer()
-    trainer.train_mod(lambda : gym.make(args.env), ac=MLPActorCritic, ac_kwargs=ac_kwargs,
-                      seed=args.seed, steps_per_epoch=args.steps, batch_size=args.batch_size,
-                      epochs=args.epochs, gamma=args.gamma, clip_ratio=args.clip_ratio,
-                      pi_lr=args.pi_lr, vf_lr=args.vf_lr, train_pi_iters=args.train_pi_iters,
-                      train_v_iters=args.train_v_iters, lam=args.lam, max_ep_len=args.max_ep_len, 
-                      logger_kwargs=logger_kwargs, save_freq=args.save_freq)
+    trainer.train_mod(lambda : gym.make(args.env), model_path=args.model_path, ac=MLPActorCritic, 
+                      ac_kwargs=ac_kwargs, seed=args.seed, steps_per_epoch=args.steps, 
+                      batch_size=args.batch_size, epochs=args.epochs, gamma=args.gamma, 
+                      clip_ratio=args.clip_ratio, pi_lr=args.pi_lr, vf_lr=args.vf_lr, 
+                      train_pi_iters=args.train_pi_iters, train_v_iters=args.train_v_iters, 
+                      lam=args.lam, max_ep_len=args.max_ep_len, logger_kwargs=logger_kwargs, 
+                      save_freq=args.save_freq, checkpoint_freq=args.checkpoint_freq)

@@ -208,12 +208,17 @@ class TD3Trainer:
             logger.store(LossPi=loss_pi.item())
 
     def train_mod(self, env_fn, rew_fn, rew_eps, goal_fn, goal_mask, her_strat='final', her_k=1,
-                  ac=MLPActorCriticTD3, ac_kwargs=dict(), seed=0, steps_per_epoch=4000, epochs=100, 
-                  buf_size=1000000, gamma=0.99, polyak=0.995, pi_lr=1e-3, q_lr=1e-3, batch_size=100, 
-                  start_steps=10000, learning_starts=1000, update_every=50, target_noise=0.2, 
-                  noise_clip=0.5, policy_delay=2, num_test_episodes=10, max_ep_len=1000, 
-                  logger_kwargs=dict(), save_freq=10):
+                  model_path='', ac=MLPActorCriticTD3, ac_kwargs=dict(), seed=0, steps_per_epoch=4000, 
+                  epochs=100, buf_size=1000000, gamma=0.99, polyak=0.995, pi_lr=1e-3, q_lr=1e-3, 
+                  batch_size=100, start_steps=10000, learning_starts=1000, update_every=50, 
+                  target_noise=0.2, noise_clip=0.5, policy_delay=2, num_test_episodes=10, 
+                  max_ep_len=1000, logger_kwargs=dict(), save_freq=10, checkpoint_freq=20):
         setup_pytorch_for_mpi()
+        
+        # Initialize logger
+        logger = EpochLogger(**logger_kwargs)
+        logger.save_config(locals()) 
+        
         local_buf_size = buf_size // num_procs()
         local_steps_per_epoch = steps_per_epoch // num_procs()
         local_start_steps = start_steps // num_procs()
@@ -227,9 +232,10 @@ class TD3Trainer:
         # Initialize environment and Actor-Critic
         env = env_fn()
         goal_dim = len(goal_mask)
-        ac_mod = ac(env, goal_dim, **ac_kwargs)
-        logger = EpochLogger(**logger_kwargs)
-        logger.save_config(locals()) 
+        if len(model_path) > 0:
+            ac_mod = torch.load(model_path)
+        else:
+            ac_mod = ac(env, goal_dim, **ac_kwargs)
         
         # Initialize HER goal sampling strategy
         if her_strat == 'final':
@@ -316,6 +322,8 @@ class TD3Trainer:
 
             if (epoch % save_freq) == 0:
                 logger.save_state({'env': env})
+            if ((epoch + 1) % checkpoint_freq) == 0:
+                logger.save_state({'env': env}, itr=epoch+1)
             
             # Log info about epoch
             logger.log_tabular('Epoch', epoch)
@@ -339,6 +347,7 @@ if __name__ == '__main__':
     parser.add_argument('--rew_eps', type=float, default=np.deg2rad(10))
     parser.add_argument('--her_strat', type=str, default='final')
     parser.add_argument('--her_k', type=int, default=2)
+    parser.add_argument('--model_path', type=str, default='')
     parser.add_argument('--hid_act', type=int, default=64)
     parser.add_argument('--hid_cri', type=int, default=64)
     parser.add_argument('--l', type=int, default=2)
@@ -361,6 +370,7 @@ if __name__ == '__main__':
     parser.add_argument('--num_test_episodes', type=int, default=10)
     parser.add_argument('--max_ep_len', type=int, default=1000)
     parser.add_argument('--save_freq', type=int, default=10)
+    parser.add_argument('--checkpoint_freq', type=int, default=20)
     parser.add_argument('--exp_name', type=str, default='her_td3_custom')
     parser.add_argument('--cpu', type=int, default=4)
     args = parser.parse_args()
@@ -376,7 +386,7 @@ if __name__ == '__main__':
                      action_std=args.action_std)
     
     # EpochLogger kwargs
-    data_dir = '/home/sherif/user/python/DRL/data/her'
+    data_dir = '/home/sherif/user/python/DeepRL/data/her'
     logger_kwargs = setup_logger_kwargs(args.exp_name, data_dir=data_dir, seed=args.seed)
 
     # Begin training
@@ -386,12 +396,13 @@ if __name__ == '__main__':
     goal_mask = [0, 1]
     trainer.train_mod(env_fn, rew_fn=sparse_rew_pendulum, rew_eps=args.rew_eps,
                       goal_fn=sample_goal_pendulum, goal_mask=goal_mask, her_strat=args.her_strat,
-                      her_k=args.her_k, ac=MLPActorCriticTD3, ac_kwargs=ac_kwargs,
-                      seed=args.seed, steps_per_epoch=args.steps, epochs=args.epochs, 
-                      buf_size=args.buf_size, gamma=args.gamma, polyak=args.polyak, 
-                      pi_lr=args.pi_lr, q_lr=args.q_lr, batch_size=args.batch_size, 
-                      start_steps=args.start_steps, learning_starts=args.learning_starts, 
-                      update_every=args.update_every, target_noise=args.target_noise, 
-                      noise_clip=args.noise_clip, policy_delay=args.policy_delay,
-                      num_test_episodes=args.num_test_episodes, max_ep_len=args.max_ep_len, 
-                      logger_kwargs=logger_kwargs, save_freq=args.save_freq)
+                      her_k=args.her_k, model_path=args.model_path, ac=MLPActorCriticTD3, 
+                      ac_kwargs=ac_kwargs, seed=args.seed, steps_per_epoch=args.steps, 
+                      epochs=args.epochs, buf_size=args.buf_size, gamma=args.gamma, 
+                      polyak=args.polyak, pi_lr=args.pi_lr, q_lr=args.q_lr, 
+                      batch_size=args.batch_size, start_steps=args.start_steps, 
+                      learning_starts=args.learning_starts, update_every=args.update_every, 
+                      target_noise=args.target_noise, noise_clip=args.noise_clip, 
+                      policy_delay=args.policy_delay, num_test_episodes=args.num_test_episodes, 
+                      max_ep_len=args.max_ep_len, logger_kwargs=logger_kwargs, 
+                      save_freq=args.save_freq, checkpoint_freq=args.checkpoint_freq)

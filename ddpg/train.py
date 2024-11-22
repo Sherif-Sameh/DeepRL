@@ -187,15 +187,20 @@ class DDPGTrainer:
         # Log training statistics
         logger.store(LossQ=loss_q.item(), LossPi=loss_pi.item())
     
-    def train_mod(self, env_fn, ac=MLPActorCritic, ac_kwargs=dict(), seed=0, 
+    def train_mod(self, env_fn, model_path='', ac=MLPActorCritic, ac_kwargs=dict(), seed=0, 
                   prioritized_replay=False, prioritized_replay_alpha=0.6, 
                   prioritized_replay_beta0=0.4, prioritized_replay_beta_rate=None, 
                   prioritized_replay_eps=1e-6, steps_per_epoch=4000, epochs=100, 
                   buf_size=1000000, gamma=0.99, polyak=0.995, pi_lr=1e-3, q_lr=1e-3, 
                   batch_size=100, start_steps=10000, learning_starts=1000,
                   update_every=50, num_test_episodes=10, max_ep_len=1000, 
-                  logger_kwargs=dict(), save_freq=10):
+                  logger_kwargs=dict(), save_freq=10, checkpoint_freq=20):
         setup_pytorch_for_mpi()
+
+        # Initialize logger
+        logger = EpochLogger(**logger_kwargs)
+        logger.save_config(locals())
+         
         local_buf_size = buf_size // num_procs()
         local_steps_per_epoch = steps_per_epoch // num_procs()
         local_start_steps = start_steps // num_procs()
@@ -208,9 +213,10 @@ class DDPGTrainer:
 
         # Initialize environment and Actor-Critic
         env = env_fn()
-        ac_mod = ac(env, **ac_kwargs)
-        logger = EpochLogger(**logger_kwargs)
-        logger.save_config(locals()) 
+        if len(model_path) > 0:
+            ac_mod = torch.load(model_path)
+        else:
+            ac_mod = ac(env, **ac_kwargs)
 
         # Initialize the experience replay buffer for training
         if prioritized_replay==True:
@@ -277,6 +283,8 @@ class DDPGTrainer:
 
             if (epoch % save_freq) == 0:
                 logger.save_state({'env': env})
+            if ((epoch + 1) % checkpoint_freq) == 0:
+                logger.save_state({'env': env}, itr=epoch+1)
             buf.update_beta()
             
             # Log info about epoch
@@ -298,6 +306,7 @@ if __name__ == '__main__':
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument('--env', type=str, default='HalfCheetah-v2')
+    parser.add_argument('--model_path', type=str, default='')
     parser.add_argument('--hid_act', type=int, default=64)
     parser.add_argument('--hid_cri', type=int, default=64)
     parser.add_argument('--l', type=int, default=2)
@@ -319,6 +328,7 @@ if __name__ == '__main__':
     parser.add_argument('--num_test_episodes', type=int, default=10)
     parser.add_argument('--max_ep_len', type=int, default=1000)
     parser.add_argument('--save_freq', type=int, default=10)
+    parser.add_argument('--checkpoint_freq', type=int, default=20)
     parser.add_argument('--exp_name', type=str, default='ddpg_custom')
     parser.add_argument('--cpu', type=int, default=4)
     args = parser.parse_args()
@@ -335,16 +345,17 @@ if __name__ == '__main__':
                      use_BN=args.use_BN)
     
     # EpochLogger kwargs
-    data_dir = '/home/sherif/user/python/DRL/data/ddpg'
+    data_dir = '/home/sherif/user/python/DeepRL/data/ddpg'
     logger_kwargs = setup_logger_kwargs(args.exp_name, data_dir=data_dir, seed=args.seed)
 
     # Begin training
     trainer = DDPGTrainer()
-    trainer.train_mod(lambda : gym.make(args.env), ac=MLPActorCritic, ac_kwargs=ac_kwargs,
-                      seed=args.seed, prioritized_replay=args.prioritized_replay, 
+    trainer.train_mod(lambda : gym.make(args.env), model_path=args.model_path, ac=MLPActorCritic, 
+                      ac_kwargs=ac_kwargs, seed=args.seed, prioritized_replay=args.prioritized_replay, 
                       steps_per_epoch=args.steps, epochs=args.epochs, buf_size=args.buf_size, 
                       gamma=args.gamma, polyak=args.polyak, pi_lr=args.pi_lr, q_lr=args.q_lr, 
                       batch_size=args.batch_size, start_steps=args.start_steps, 
                       learning_starts=args.learning_starts, update_every=args.update_every, 
                       num_test_episodes=args.num_test_episodes, max_ep_len=args.max_ep_len, 
-                      logger_kwargs=logger_kwargs, save_freq=args.save_freq)
+                      logger_kwargs=logger_kwargs, save_freq=args.save_freq, 
+                      checkpoint_freq=args.checkpoint_freq)

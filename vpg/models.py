@@ -6,10 +6,10 @@ from torch import nn
 from torch.distributions.categorical import Categorical
 from torch.distributions.normal import Normal
 
-def init_weights(module):
+def init_weights(module, gain):
     if isinstance(module, nn.Linear):
-        nn.init.xavier_uniform_(module.weight)
-        module.bias.data.fill_(0.01)
+        nn.init.xavier_uniform_(module.weight, gain=gain)
+        module.bias.data.fill_(0)
 
 class MLP(nn.Module):
     def __init__(self, obs_dim, hidden_sizes, hidden_acts):
@@ -29,6 +29,7 @@ class MLP(nn.Module):
             self.net.add_module(f'hidden_{i+1}', nn.Linear(hidden_sizes[i], 
                                                            hidden_sizes[i+1]))
             self.net.add_module(f'activation_{i+1}', hidden_acts[i]())
+        self.net.apply(lambda m: init_weights(m, gain=1.0))
 
     def layer_summary(self):
         x = torch.randn((1, self.obs_dim))
@@ -48,7 +49,7 @@ class MLPActor(MLP):
 
         # Add the output layer to the network and intialize its weights 
         self.net.add_module('output', nn.Linear(hidden_sizes[-1], act_dim))
-        self.net.apply(init_weights)
+        self.net[-1].apply(lambda m: init_weights(m, gain=0.01))
 
     def forward(self, obs):
         raise NotImplementedError
@@ -121,7 +122,7 @@ class MLPCritic(MLP):
         
         # Add the output layer to the network and intialize its weights 
         self.net.add_module('output', nn.Linear(hidden_sizes[-1], 1))
-        self.net.apply(init_weights)
+        self.net[-1].apply(lambda m: init_weights(m, gain=1.0))
 
     def forward(self, obs):
         with torch.no_grad():
