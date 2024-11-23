@@ -345,7 +345,7 @@ if __name__ == '__main__':
                      use_BN=args.use_BN)
     
     # EpochLogger kwargs
-    data_dir = '/home/sherif/user/python/DeepRL/data/ddpg'
+    data_dir = '/home/sherif/user/python/DeepRL/data/ddpg/' + args.env + '/'
     logger_kwargs = setup_logger_kwargs(args.exp_name, data_dir=data_dir, seed=args.seed)
 
     # Begin training
