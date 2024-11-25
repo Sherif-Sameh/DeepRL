@@ -1,3 +1,4 @@
+import os
 import gym
 from gym.spaces import Box
 import time
@@ -284,7 +285,7 @@ if __name__ == '__main__':
                      action_std=args.action_std)
     
     # EpochLogger kwargs
-    data_dir = '/home/sherif/user/python/DeepRL/data/td3/' + args.env + '/'
+    data_dir = os.getcwd() + '/../data/td3/' + args.env + '/'
     logger_kwargs = setup_logger_kwargs(args.exp_name, data_dir=data_dir, seed=args.seed)
 
     # Begin training

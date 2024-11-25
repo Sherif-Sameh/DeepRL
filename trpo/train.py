@@ -1,3 +1,4 @@
+import os
 import gym
 from gym.spaces import Discrete, Box
 import time
@@ -333,7 +334,7 @@ if __name__ == '__main__':
                      hidden_acts_critic=torch.nn.Tanh)
     
     # EpochLogger kwargs
-    data_dir = '/home/sherif/user/python/DeepRL/data/trpo/' + args.env + '/' 
+    data_dir = os.getcwd() + '/../data/trpo/' + args.env + '/'
     logger_kwargs = setup_logger_kwargs(args.exp_name, data_dir=data_dir, seed=args.seed)
 
     # Begin training

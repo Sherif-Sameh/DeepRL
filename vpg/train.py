@@ -1,3 +1,4 @@
+import os
 import gym
 from gym.spaces import Box, Discrete
 import time
@@ -217,7 +218,7 @@ if __name__ == '__main__':
     mpi_fork(args.cpu)  # run parallel code with mpi
     
     from spinup.utils.run_utils import setup_logger_kwargs
-    data_dir = '/home/sherif/user/python/DeepRL/data/vpg/' + args.env + '/' 
+    data_dir = os.getcwd() + '/../data/vpg/' + args.env + '/'
     logger_kwargs = setup_logger_kwargs(args.exp_name, data_dir=data_dir, seed=args.seed)
 
     ac_kwargs = dict(hidden_sizes_actor=[args.hid_act]*args.l, 
