@@ -153,7 +153,7 @@ class PPOTrainer:
                      DeltaLossV=(loss_val - loss_val_old).item())
     
     def train_mod(self, env_fn, model_path='', ac=MLPActorCritic, ac_kwargs=dict(), seed=0,
-                  steps_per_epoch=4096, batch_size=512, epochs=50, gamma=0.99, 
+                  steps_per_epoch=4000, batch_size=500, epochs=50, gamma=0.99, 
                   clip_ratio=0.2, pi_lr=3e-4, vf_lr=1e-3, train_pi_iters=80, 
                   train_v_iters=80, lam=0.97, max_ep_len=1000, target_kl=0.01, 
                   logger_kwargs=dict(), save_freq=10, checkpoint_freq=20):
@@ -248,8 +248,8 @@ if __name__ == '__main__':
     parser.add_argument('--hid_cri', type=int, default=64)
     parser.add_argument('--l', type=int, default=2)
     parser.add_argument('--seed', '-s', type=int, default=0)
-    parser.add_argument('--steps', type=int, default=4096)
-    parser.add_argument('--batch_size', type=int, default=512)
+    parser.add_argument('--steps', type=int, default=4000)
+    parser.add_argument('--batch_size', type=int, default=500)
     parser.add_argument('--epochs', type=int, default=100)
     parser.add_argument('--gamma', type=float, default=0.99)
     parser.add_argument('--clip_ratio', type=float, default=0.2)
