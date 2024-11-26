@@ -8,7 +8,7 @@ from torch import nn
 
 def init_weights(module, gain):
     if isinstance(module, nn.Linear):
-        nn.init.xavier_uniform_(module.weight, gain=gain)
+        nn.init.orthogonal_(module.weight, gain=gain)
         module.bias.data.fill_(0)
 
 def polyak_average(params, target_params, polyak):
