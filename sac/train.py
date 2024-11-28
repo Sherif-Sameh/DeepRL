@@ -116,7 +116,8 @@ class SACTrainer:
     
     def __update_params(self, ac: MLPActorCritic, alpha_mod: AlphaModule, buf: ReplayBuffer, 
                         pi_optim: Adam, q1_optim: Adam, q2_optim: Adam, alpha_optim: Adam, 
-                        logger: EpochLogger, gamma, polyak, entropy_target, update_alpha=True):
+                        logger: EpochLogger, gamma, polyak, alpha_min, entropy_target, 
+                        update_alpha=True):
         # Get mini-batch from replay buffer
         obs, act, logp, rew, obs_next, done = buf.get_batch()
         alpha_det = alpha_mod.forward().detach()
@@ -151,6 +152,8 @@ class SACTrainer:
             loss_alpha.backward()
             mpi_avg_grads(alpha_mod)
             alpha_optim.step()
+            with torch.no_grad(): 
+                alpha_mod.log_alpha.clamp_min_(torch.tensor(np.log(alpha_min)))
             logger.store(LossAlpha=loss_alpha.item())
 
         # Update target critic networks
@@ -163,7 +166,7 @@ class SACTrainer:
 
     def train_mod(self, env_fn, model_path='', ac=MLPActorCritic, ac_kwargs=dict(), 
                   seed=0, steps_per_epoch=4000, epochs=100, buf_size=1000000, 
-                  gamma=0.99, polyak=0.995, lr=1e-3, alpha=0.2, 
+                  gamma=0.99, polyak=0.995, lr=1e-3, alpha=0.2, alpha_min=3e-3,
                   entropy_target=None, auto_alpha=False, batch_size=100, 
                   start_steps=10000, learning_starts=1000, update_every=50, 
                   num_test_episodes=10, max_ep_len=1000, logger_kwargs=dict(), 
@@ -242,8 +245,8 @@ class SACTrainer:
                     for _ in range(update_every):
                         self.__update_params(ac_mod, alpha_mod, buf, pi_optim, 
                                              q1_optim, q2_optim, alpha_optim, 
-                                             logger, gamma, polyak, entropy_target, 
-                                             update_alpha=auto_alpha)
+                                             logger, gamma, polyak, alpha_min, 
+                                             entropy_target, update_alpha=auto_alpha)
             
             # Evaluate deterministic policy
             for _ in range(num_test_episodes):
@@ -296,6 +299,7 @@ if __name__ == '__main__':
     parser.add_argument('--polyak', type=float, default=0.995)
     parser.add_argument('--lr', type=float, default=1e-3)
     parser.add_argument('--alpha', type=float, default=0.2)
+    parser.add_argument('--alpha_min', type=float, default=3e-3)
     parser.add_argument('--auto_alpha', type=bool, default=False)
     parser.add_argument('--batch_size', type=int, default=100)
     parser.add_argument('--start_steps', type=int, default=10000)
@@ -327,7 +331,7 @@ if __name__ == '__main__':
     trainer.train_mod(lambda : gym.make(args.env), model_path=args.model_path, ac=MLPActorCritic, 
                       ac_kwargs=ac_kwargs, seed=args.seed, steps_per_epoch=args.steps, 
                       epochs=args.epochs, buf_size=args.buf_size, gamma=args.gamma, 
-                      polyak=args.polyak, lr=args.lr, alpha=args.alpha, 
+                      polyak=args.polyak, lr=args.lr, alpha=args.alpha, alpha_min=args.alpha_min,
                       auto_alpha=args.auto_alpha, batch_size=args.batch_size, 
                       start_steps=args.start_steps, learning_starts=args.learning_starts, 
                       update_every=args.update_every, num_test_episodes=args.num_test_episodes, 
