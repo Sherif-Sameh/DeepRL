@@ -1,2 +1,4 @@
 /data/
+/video/
+/*.sh
 **/__pycache__/
