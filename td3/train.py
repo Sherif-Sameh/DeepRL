@@ -1,6 +1,6 @@
 import os
-import gym
-from gym.spaces import Box
+import gymnasium as gym
+from gymnasium.spaces import Box
 import time
 import numpy as np
 import torch
@@ -178,8 +178,8 @@ class TD3Trainer:
         logger.setup_pytorch_saver(ac_mod)
 
         # Initialize environment variables
-        obs, ep_len = env.reset(), 0
-        start_time = time.time()
+        obs, _ = env.reset(seed=seed)
+        ep_len, start_time = 0, time.time()
 
         for epoch in range(epochs):
             for step in range(local_steps_per_epoch):
@@ -189,17 +189,17 @@ class TD3Trainer:
                     act = env.action_space.sample()
                     _, q_val = ac_mod.step(torch.as_tensor(obs, dtype=torch.float32))
                     
-                obs_next, rew, done, _ = env.step(act)
+                obs_next, rew, terminated, truncated, _ = env.step(act)
 
-                buf.update_buffer(obs, act, rew, q_val, done)
+                buf.update_buffer(obs, act, rew, q_val, terminated)
                 logger.store(QVals=q_val)
                 obs, ep_len = obs_next, ep_len + 1
 
                 epoch_done = step == (local_steps_per_epoch-1)
-                max_ep_len_reached = ep_len == max_ep_len
+                truncated = (ep_len == max_ep_len) or truncated
 
-                if epoch_done or done or max_ep_len_reached:
-                    obs, ep_len = env.reset(), 0
+                if epoch_done or terminated or truncated:
+                    obs, _, ep_len = env.reset(), 0
                 
                 if (buf.buf_full or (buf.ctr > local_learning_starts)) \
                     and ((step % update_every) == 0):
@@ -213,13 +213,14 @@ class TD3Trainer:
             # Evaluate deterministic policy
             for _ in range(num_test_episodes):
                 ep_len, ep_ret = 0, 0
-                obs, done = env.reset(), False
+                obs, _, done = env.reset(), False
                 while not done:
                     act = ac_mod.act(torch.as_tensor(obs, dtype=torch.float32))
-                    obs, rew, done, _ = env.step(act)
+                    obs, rew, terminated, truncated, _ = env.step(act)
                     ep_len, ep_ret = ep_len + 1, ep_ret + rew
+                    done = terminated or truncated
                 logger.store(EpRet=ep_ret, EpLen=ep_len)
-            obs = env.reset()
+            obs, _ = env.reset()
 
             if (epoch % save_freq) == 0:
                 logger.save_state({'env': env})

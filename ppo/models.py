@@ -1,6 +1,6 @@
 import numpy as np
-import gym
-from gym.spaces import Box, Discrete
+import gymnasium as gym
+from gymnasium.spaces import Box, Discrete
 
 import torch
 from torch import nn
@@ -14,7 +14,7 @@ def init_weights(module, gain):
         module.bias.data.fill_(0)
 
 class MLP(nn.Module):
-    def __init__(self, obs_dim, hidden_sizes, hidden_acts):
+    def __init__(self, prefix, obs_dim, hidden_sizes, hidden_acts):
         super().__init__()
         self.obs_dim = obs_dim
 
@@ -28,9 +28,9 @@ class MLP(nn.Module):
         self.net = nn.Sequential()
         hidden_sizes = [obs_dim] + hidden_sizes
         for i in range(len(hidden_acts)):
-            self.net.add_module(f'hidden_{i+1}', nn.Linear(hidden_sizes[i], 
+            self.net.add_module(prefix + f'_hidden_{i+1}', nn.Linear(hidden_sizes[i], 
                                                            hidden_sizes[i+1]))
-            self.net.add_module(f'activation_{i+1}', hidden_acts[i]())
+            self.net.add_module(prefix + f'_activation_{i+1}', hidden_acts[i]())
 
         # Initialize all parameters of hidden layers
         self.net.apply(lambda m: init_weights(m, gain=np.sqrt(2)))
@@ -49,14 +49,14 @@ class MLP(nn.Module):
     
 class MLPActor(MLP):
     def __init__(self, obs_dim, act_dim, hidden_sizes, hidden_acts):
-        super().__init__(obs_dim, hidden_sizes, hidden_acts)
+        super().__init__('actor', obs_dim, hidden_sizes, hidden_acts)
 
         # Add the output layer to the network and intialize its weights 
-        self.net.add_module('output', nn.Linear(hidden_sizes[-1], act_dim))
+        self.net.add_module('actor_output', nn.Linear(hidden_sizes[-1], act_dim))
         self.net[-1].apply(lambda m: init_weights(m, gain=0.01))
 
         # Initialize a generic stochastic policy
-        self.pi = torch.distributions.Distribution()
+        self.pi = torch.distributions.Distribution(validate_args=False)
 
     def forward(self, obs):
         raise NotImplementedError
@@ -87,7 +87,7 @@ class MLPActorDiscrete(MLPActor):
             self.pi = Categorical(logits=logits)
             a = self.pi.sample()
         
-        return a.numpy()
+        return a
 
     def update_policy(self, obs):
         with torch.no_grad():
@@ -98,7 +98,7 @@ class MLPActorDiscrete(MLPActor):
         with torch.no_grad():
             log_prob = self.pi.log_prob(act)
         
-        return log_prob.numpy()
+        return log_prob
     
     def log_prob_grad(self, obs, act):
         logits = self.net(obs)
@@ -110,7 +110,7 @@ class MLPActorDiscrete(MLPActor):
         self.update_policy(obs) # Re-evaluate policy on all observations
         kl = torch.distributions.kl.kl_divergence(pi_prev, self.pi)
         
-        return kl.mean().item()
+        return kl.mean()
             
 class MLPActorContinuous(MLPActor):
     def __init__(self, obs_dim, act_dim, hidden_sizes, hidden_acts):
@@ -127,7 +127,7 @@ class MLPActorContinuous(MLPActor):
             self.pi = Normal(mean, torch.exp(self.log_std))
             a = self.pi.sample()
         
-        return a.numpy()
+        return a
     
     def update_policy(self, obs):
         with torch.no_grad():
@@ -138,7 +138,7 @@ class MLPActorContinuous(MLPActor):
         with torch.no_grad():
             log_prob = self.pi.log_prob(act).sum(axis=-1)
         
-        return log_prob.numpy()
+        return log_prob
     
     def log_prob_grad(self, obs, act):
         mean = self.net(obs)
@@ -161,55 +161,62 @@ class MLPActorContinuous(MLPActor):
         all_kls = torch.sum(pre_sum, dim=1)
         
         # Return the mean KL divergence over the batch
-        return torch.mean(all_kls).item()
+        return torch.mean(all_kls)
     
 class MLPCritic(MLP):
     def __init__(self, obs_dim, hidden_sizes, hidden_acts):
-        super().__init__(obs_dim, hidden_sizes, hidden_acts)
+        super().__init__('critic', obs_dim, hidden_sizes, hidden_acts)
         
         # Add the output layer to the network and intialize its weights 
-        self.net.add_module('output', nn.Linear(hidden_sizes[-1], 1))
+        self.net.add_module('critic_output', nn.Linear(hidden_sizes[-1], 1))
         self.net[-1].apply(lambda m: init_weights(m, gain=1))
 
     def forward(self, obs):
         with torch.no_grad():
             v = torch.squeeze(self.net(obs), -1)
         
-        return v.numpy()
+        return v
     
     def forward_grad(self, obs):
         return torch.squeeze(self.net(obs), -1)
 
 class MLPActorCritic(nn.Module):
-    def __init__(self, env: gym.Env, hidden_sizes_actor, hidden_sizes_critic,
+    def __init__(self, env, hidden_sizes_actor, hidden_sizes_critic,
                  hidden_acts_actor, hidden_acts_critic):
         super().__init__()
+        obs_dim = env.single_observation_space.shape[0]
 
         # Initialize the actor based on the action space type of the env
-        if isinstance(env.action_space, Discrete):
-            act_dim = env.action_space.n
-            self.actor = MLPActorDiscrete(env.observation_space.shape[0], act_dim, 
-                                          hidden_sizes_actor, hidden_acts_actor)
-        elif isinstance(env.action_space, Box):
-            act_dim = env.action_space.shape[0]
-            self.actor = MLPActorContinuous(env.observation_space.shape[0], act_dim, 
-                                            hidden_sizes_actor, hidden_acts_actor)
+        if isinstance(env.single_action_space, Discrete):
+            act_dim = env.single_action_space.n
+            self.actor = MLPActorDiscrete(obs_dim, act_dim, hidden_sizes_actor, 
+                                          hidden_acts_actor)
+        elif isinstance(env.single_action_space, Box):
+            act_dim = env.single_action_space.shape[0]
+            self.actor = MLPActorContinuous(obs_dim, act_dim, hidden_sizes_actor, 
+                                            hidden_acts_actor)
         else:
             raise NotImplementedError
         
         # Initialize the critic
-        self.critic = MLPCritic(env.observation_space.shape[0], hidden_sizes_critic,
-                                hidden_acts_critic)
+        self.critic = MLPCritic(obs_dim, hidden_sizes_critic, hidden_acts_critic)
         
     def step(self, obs):
         act = self.actor(obs)
         val = self.critic(obs)
-        logp = self.actor.log_prob_no_grad(torch.as_tensor(act, dtype=torch.float32))
+        logp = self.actor.log_prob_no_grad(act)
 
-        return act, val, logp
+        return act.numpy(), val.numpy(), logp.numpy()
     
     def act(self, obs):
-        return self.actor(obs)
+        return self.actor(obs).numpy()
+    
+    # Only for tracing the actor and critic's networks for tensorboard
+    def forward(self, obs):
+        act_net = self.actor.net(obs)
+        val_net = self.critic.net(obs)
+
+        return act_net, val_net
     
     def layer_summary(self):
         print('Actor Summary: \n')

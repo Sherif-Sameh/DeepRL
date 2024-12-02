@@ -1,10 +1,9 @@
-import gym
-import cv2
-import numpy as np
-import signal
+import os
 import datetime
+import cv2
 from pathlib import Path
-from spinup.utils.test_policy import load_policy_and_env, run_policy
+import gymnasium as gym
+import torch
 
 class VideoRecorder(gym.Wrapper):
     def __init__(self, env, output_dir="./videos/", fps=30):
@@ -14,8 +13,8 @@ class VideoRecorder(gym.Wrapper):
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.fps = fps  
 
-    def render(self, mode='rgb_array', **kwargs):
-        self.frames.append(super().render(mode, **kwargs))
+    def render(self):
+        self.frames.append(super().render())
 
     def close(self):
         self.save_video()
@@ -45,7 +44,8 @@ class VideoRecorder(gym.Wrapper):
 if __name__ == '__main__':
     import argparse
     parser = argparse.ArgumentParser()
-    parser.add_argument('--data', type=str, default='../data/vpg/vpg_spinup_discrete_1')
+    parser.add_argument('--env', type=str, default='HalfCheetah-v2')
+    parser.add_argument('--data', type=str, default='../runs/vpg/')
     parser.add_argument('--itr', type=int, default=-1)
     parser.add_argument('--num_episodes', type=int, default=100)
     parser.add_argument('--record', type=bool, default=False)
@@ -53,16 +53,29 @@ if __name__ == '__main__':
     parser.add_argument('--video_fps', type=int, default=30)
     args = parser.parse_args()
 
-    itr = 'last' if args.itr == -1 else args.itr
-    env, get_action = load_policy_and_env(args.data, itr=itr)
+    model_name = 'model.pt' if args.itr < 0 else f'model{args.itr}.pt'
+    model_path = os.path.join(args.data, f'pyt_save/{model_name}')
+    model = torch.load(model_path, weights_only=False)
+    assert hasattr(model, 'act'), 'model must be implement an act(obs) method getting actions'
+
+    render_mode = 'rgb_array' if args.record==True else 'human'
+    env = gym.make(args.env, render_mode=render_mode)
+    env.metadata['render_fps'] = args.video_fps
     if args.record == True:
         env_name = getattr(env.unwrapped.spec, "id", env.unwrapped.__class__.__name__)
-        env = VideoRecorder(env, output_dir=args.video_dir + '/' + env_name + '/', fps=args.video_fps)
+        video_dir = os.path.join(args.video_dir, f'{env_name}')
+        env = VideoRecorder(env, video_dir, fps=args.video_fps)
 
-    def signal_handler(signum, frame):
-        env.close()
-        print('Simulation Terminated')
-    signal.signal(signal.SIGINT, signal_handler)
+    for ep in range(args.num_episodes):
+        (obs, _), done = env.reset(), False
+        ep_ret, ep_len = 0, 0
+        while not done:
+            if args.record == True:
+                env.render()
+            act = model.act(torch.as_tensor(obs, dtype=torch.float32))
+            obs, rew, terminated, truncated, _ = env.step(act)
+            ep_ret, ep_len = ep_ret + rew, ep_len + 1
+            done = terminated or truncated
+        print(f'Episode {ep}: EpRet = {ep_ret} \t EpLen = {ep_len}')
 
-    run_policy(env, get_action, num_episodes=args.num_episodes)
     env.close()

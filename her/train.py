@@ -1,6 +1,6 @@
 import os
-import gym
-from gym.spaces import Box
+import gymnasium as gym
+from gymnasium.spaces import Box
 import time
 import numpy as np
 import torch
@@ -265,9 +265,9 @@ class TD3Trainer:
         logger.setup_pytorch_saver(ac_mod)
 
         # Initialize environment variables
-        obs, ep_len = env.reset(), 0
+        obs, _ = env.reset()
         goal = goal_fn()
-        start_time = time.time()
+        ep_len, start_time = 0, time.time()
 
         for epoch in range(epochs):
             for step in range(local_steps_per_epoch):
@@ -277,17 +277,17 @@ class TD3Trainer:
                 else:
                     act = env.action_space.sample()
                     
-                obs_next, _, done, _ = env.step(act)
+                obs_next, _, terminated, truncated, _ = env.step(act)
                 rew = rew_fn(obs_next, act, goal, eps=rew_eps)
 
-                buf.update_buffer(obs_goal, act, rew, done)
-                buf_ep.update_buffer(obs, act, done)
+                buf.update_buffer(obs_goal, act, rew, terminated)
+                buf_ep.update_buffer(obs, act, terminated)
                 obs, ep_len = obs_next, ep_len + 1
 
                 epoch_done = step == (local_steps_per_epoch-1)
-                max_ep_len_reached = ep_len == max_ep_len
+                truncated = (ep_len == max_ep_len) or truncated
 
-                if epoch_done or done or max_ep_len_reached:                    
+                if epoch_done or terminated or truncated:                    
                     ep_obs, ep_act, ep_done = buf_ep.terminate_episode()
                     ep_goals = goal_strat.get_goals(ep_obs)
                     for k in range(her_k):
@@ -296,7 +296,7 @@ class TD3Trainer:
                                              ep_act, rew_k, ep_done, ep_len, her_k=k+1)
                     
                     goal = goal_fn()
-                    obs, ep_len = env.reset(), 0
+                    obs, _, ep_len = env.reset(), 0
                                         
                 if (buf.buf_full or (buf.ctr > local_learning_starts)) \
                     and ((step % update_every) == 0):
@@ -310,16 +310,17 @@ class TD3Trainer:
             # Evaluate deterministic policy
             for _ in range(num_test_episodes):
                 ep_len, ep_ret = 0, 0
-                obs, done = env.reset(), False
+                obs, _, done = env.reset(), False
                 goal = goal_fn()
                 while not done:
                     obs_goal = np.concatenate((obs, goal))
                     act = ac_mod.act(torch.as_tensor(obs_goal, dtype=torch.float32))
-                    obs, _, done, _ = env.step(act)
+                    obs, _, terminated, truncated, _ = env.step(act)
                     rew = rew_fn(obs, act, goal, eps=rew_eps)
                     ep_len, ep_ret = ep_len + 1, ep_ret + rew
+                    done = terminated or truncated
                 logger.store(EpRet=ep_ret, EpLen=ep_len)
-            obs, ep_len = env.reset(), 0
+            obs, _, ep_len = env.reset(), 0
 
             if (epoch % save_freq) == 0:
                 logger.save_state({'env': env})

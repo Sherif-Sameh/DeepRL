@@ -1,4 +1,5 @@
-/data/
+/runs/
 /video/
 /*.sh
 **/__pycache__/
+/*.zip

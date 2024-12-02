@@ -1,79 +1,97 @@
 import os
-import gym
-from gym.spaces import Box, Discrete
+import inspect
+import gymnasium as gym
+from gymnasium.vector import AsyncVectorEnv
+from gymnasium.spaces import Box, Discrete
 import time
 import numpy as np
 import torch
 from torch.optim import Adam
-from spinup.utils.logx import EpochLogger
-from spinup.utils.mpi_pytorch import setup_pytorch_for_mpi, sync_params, mpi_avg_grads
-from spinup.utils.mpi_tools import proc_id, mpi_fork, mpi_statistics_scalar, num_procs
+from torch.utils.tensorboard import SummaryWriter
 
 from models import MLPActorCritic
 
+def serialize_locals(locals_dict: dict):
+    # Unpack dictionaries within locals_dict
+    dict_keys = []
+    for k in locals_dict:
+        if isinstance(locals_dict[k], dict):
+            dict_keys.append(k)
+    for k in dict_keys:
+        nested_dict = locals_dict.pop(k)
+        for k_dict in nested_dict:
+            locals_dict[k_dict] = nested_dict[k_dict]
+    
+    # Convert any value that is a class to its name and list to tensor
+    for k in locals_dict:
+        if inspect.isclass(locals_dict[k]):
+            locals_dict[k] = locals_dict[k].__name__
+
+        if isinstance(locals_dict[k], list):
+            locals_dict[k] = torch.tensor(locals_dict[k])
+    
+    return locals_dict
+
 class VPGBuffer:
-    def __init__(self, env, buf_size, num_epochs, gamma=0.98, lam=0.92):
-        if isinstance(env.action_space, Discrete):
-            is_discrete = True
-        elif isinstance(env.action_space, Box):
-            is_discrete = False
-        else:
+    def __init__(self, env: AsyncVectorEnv, buf_size, gamma=0.98, lam=0.92):
+        if not (isinstance(env.single_action_space, Discrete) or 
+                isinstance(env.single_action_space, Box)):
             raise NotImplementedError
         
-        self.gamma = gamma
-        self.lam = lam
-        self.ep_start, self.epoch_ctr = 0, 0
-        obs_dim = env.observation_space.shape[0]
-        act_dim = 1 if is_discrete else env.action_space.shape[0]
-        
-        self.obs = np.zeros((buf_size, obs_dim), dtype=np.float32)
-        self.act = np.zeros((buf_size, act_dim), dtype=np.float32)
-        self.rew = np.zeros((buf_size+1,), dtype=np.float32)
-        self.rtg = np.zeros((buf_size,), dtype=np.float32)
-        self.adv = np.zeros((buf_size,), dtype=np.float32)
-        self.val = np.zeros((buf_size,), dtype=np.float32)
-        self.logp = np.zeros((buf_size,), dtype=np.float32) 
-        self.epoch_ret = np.zeros((num_epochs), dtype=np.float32)        
+        self.gamma, self.lam = gamma, lam
+        self.buf_size = buf_size
+        self.ep_start = np.zeros(env.num_envs, dtype=np.int64)
+        obs_shape = env.single_observation_space.shape
+        act_shape = env.single_action_space.shape
+        env_buf_size = buf_size // env.num_envs
 
-    def update_buffer(self, obs, act, rew, val, logp, tr_ctr):
-        self.obs[self.ep_start + tr_ctr] = obs
-        self.act[self.ep_start + tr_ctr] = act
-        self.rew[self.ep_start + tr_ctr] = rew
-        self.val[self.ep_start + tr_ctr] = val
-        self.logp[self.ep_start + tr_ctr] = logp
+        self.obs = np.zeros((env.num_envs, env_buf_size) + obs_shape, dtype=np.float32)
+        self.act = np.zeros((env.num_envs, env_buf_size) + act_shape, dtype=np.float32)
+        self.rew = np.zeros((env.num_envs, env_buf_size+1), dtype=np.float32)
+        self.rtg = np.zeros((env.num_envs, env_buf_size), dtype=np.float32)
+        self.adv = np.zeros((env.num_envs, env_buf_size), dtype=np.float32)
+        self.val = np.zeros((env.num_envs, env_buf_size), dtype=np.float32)
+        self.logp = np.zeros((env.num_envs, env_buf_size), dtype=np.float32)         
 
-    def terminate_ep(self, ep_len, val_terminal=0, epoch_done=True):
+    def update_buffer(self, env_id, obs, act, rew, val, logp, step):
+        self.obs[env_id, step] = obs
+        self.act[env_id, step] = act
+        self.rew[env_id, step] = rew
+        self.val[env_id, step] = val
+        self.logp[env_id, step] = logp
+
+    def terminate_ep(self, env_id, ep_len, val_terminal):
         # Calculate per episode statistics - Return to Go 
-        self.rtg[self.ep_start+ep_len-1] = self.rew[self.ep_start+ep_len-1] + self.gamma*val_terminal
+        ep_start, ep_end = self.ep_start[env_id], self.ep_start[env_id]+ep_len
+        self.rtg[env_id, ep_end-1] = self.rew[env_id, ep_end-1] + self.gamma*val_terminal
         for i in range(ep_len-2, -1, -1):
-            self.rtg[self.ep_start+i] = self.rew[self.ep_start+i] + self.gamma*self.rtg[self.ep_start+i+1]
+            self.rtg[env_id, ep_start+i] = self.rew[env_id, ep_start+i] + self.gamma*self.rtg[env_id, ep_start+i+1]
                                                
-        # Calculate per episode statistics - Advantage function
-        ep_slice = slice(self.ep_start, self.ep_start+ep_len)
-        rews = np.append(self.rew[ep_slice], val_terminal)
-        vals = np.append(self.val[ep_slice], val_terminal)
+        # Calculate per episode statistics - Advantage function (GAE)
+        ep_slice = slice(ep_start, ep_end)
+        rews = np.append(self.rew[env_id, ep_slice], val_terminal)
+        vals = np.append(self.val[env_id, ep_slice], val_terminal)
         deltas = rews[:-1] + self.gamma * vals[1:] - vals[:-1]
-        self.adv[self.ep_start+ep_len-1] = deltas[-1]
+        self.adv[env_id, ep_end-1] = deltas[-1]
         for i in range(ep_len-2, -1, -1):
-            self.adv[self.ep_start+i] = deltas[i] + self.gamma * self.lam * self.adv[self.ep_start+i+1]
-        # self.adv[ep_slice] = self.rtg[ep_slice] - self.val[ep_slice]
+            self.adv[env_id, ep_start+i] = deltas[i] + self.gamma * self.lam * self.adv[env_id, ep_start+i+1]
         
-        ep_ret = np.sum(self.rew[ep_slice])
-        self.ep_start += ep_len
-        if epoch_done:
-            adv_mean, adv_std = mpi_statistics_scalar(self.adv)
-            self.adv = (self.adv - adv_mean)/adv_std
-            self.epoch_ret[self.epoch_ctr] = np.sum(self.rew)
-            self.epoch_ctr += 1
-            self.ep_start = 0
-
+        ep_ret = np.sum(self.rew[env_id, ep_slice])
+        self.ep_start[env_id] += ep_len
+    
         return ep_ret
     
+    def terminate_epoch(self):
+        adv_mean, adv_std = self.adv.mean(), self.adv.std()
+        self.adv = (self.adv - adv_mean)/adv_std
+        self.ep_start = np.zeros_like(self.ep_start)
+
+
 class VPGTrainer:
     def __calc_pi_loss(self, ac_mod: MLPActorCritic, buf: VPGBuffer):
-        logp = ac_mod.actor.log_prob_grad(torch.as_tensor(buf.obs, dtype=torch.float32),
-                                          torch.as_tensor(buf.act, dtype=torch.float32))
-        loss_pi = -(logp * torch.as_tensor(buf.adv, dtype=torch.float32)).mean()
+        logp = ac_mod.actor.log_prob_grad(torch.as_tensor(buf.obs.reshape(buf.buf_size, -1), dtype=torch.float32),
+                                          torch.as_tensor(buf.act.reshape(buf.buf_size, -1), dtype=torch.float32))
+        loss_pi = -(logp * torch.as_tensor(buf.adv.reshape(-1), dtype=torch.float32)).mean()
 
         # Useful extra info
         ent_pi = ac_mod.actor.pi.entropy().mean().item()
@@ -81,20 +99,17 @@ class VPGTrainer:
         return loss_pi, ent_pi
 
     def __calc_val_loss(self, ac_mod: MLPActorCritic, buf: VPGBuffer):
-        val = ac_mod.critic.forward_grad(torch.as_tensor(buf.obs, dtype=torch.float32)) 
+        val = ac_mod.critic.forward_grad(torch.as_tensor(buf.obs.reshape(buf.buf_size, -1), dtype=torch.float32)) 
         
-        return ((val - torch.as_tensor(buf.rtg, dtype=torch.float32))**2).mean()
+        return ((val - torch.as_tensor(buf.rtg.reshape(-1), dtype=torch.float32))**2).mean()
         
-    def __update_params(self, train_v_iters, ac_mod: MLPActorCritic, 
-                        pi_optim: Adam, val_optim: Adam, 
-                        logger: EpochLogger, buf: VPGBuffer):
+    def __update_params(self, train_v_iters, epoch, ac_mod: MLPActorCritic, pi_optim: Adam, 
+                        val_optim: Adam, writer: SummaryWriter, buf: VPGBuffer):
         # Peform policy update
         pi_optim.zero_grad()
         loss_pi_old, ent_pi = self.__calc_pi_loss(ac_mod, buf)
         loss_pi_old.backward()
-        mpi_avg_grads(ac_mod.actor)
         pi_optim.step()
-        loss_pi, _ = self.__calc_pi_loss(ac_mod, buf)
 
         # Perform value function updates
         loss_val_old = self.__calc_val_loss(ac_mod, buf)
@@ -102,94 +117,107 @@ class VPGTrainer:
             val_optim.zero_grad()
             loss_val = self.__calc_val_loss(ac_mod, buf)
             loss_val.backward()
-            mpi_avg_grads(ac_mod.critic)
             val_optim.step()
 
         # Log epoch statistics
-        logp = ac_mod.actor.log_prob_no_grad(torch.as_tensor(buf.act))
-        approx_kl = np.mean(buf.logp - logp).item()
-        logger.store(LossPi=loss_pi_old.item(), LossV=loss_val_old.item(),
-                     KL=approx_kl, Entropy=ent_pi,
-                     DeltaLossPi=(loss_pi - loss_pi_old).item(),
-                     DeltaLossV=(loss_val - loss_val_old).item())
+        logp = ac_mod.actor.log_prob_no_grad(torch.as_tensor(buf.act.reshape(buf.buf_size, -1)))
+        approx_kl = np.mean(buf.logp.reshape(-1) - logp.numpy()).item()
+        writer.add_scalar('Loss/LossPi', loss_pi_old.item(), epoch)
+        writer.add_scalar('Loss/LossV', loss_val_old.item(), epoch)
+        writer.add_scalar('Pi/KL', approx_kl, epoch)
+        writer.add_scalar('Pi/Entropy', ent_pi, epoch)
 
 
     def train_mod(self, env_fn, model_path='', ac=MLPActorCritic, ac_kwargs=dict(), 
-                  seed=100, buf_size=4000, max_ep_len=1000, num_epochs=50, gamma=0.99, 
+                  seed=0, buf_size=4000, num_epochs=50, gamma=0.99, 
                   lam=0.97, pi_lr=3e-4, val_lr=1e-3, train_v_iters=80, 
-                  logger_kwargs=dict(), save_freq=10, checkpoint_freq=20):
-        setup_pytorch_for_mpi()
-        
-        logger = EpochLogger(**logger_kwargs)
-        logger.save_config(locals())
-        
-        seed += 10000 * proc_id()    
+                  log_dir=None, save_freq=10, checkpoint_freq=25):
+        locals_dict = locals()
+        locals_dict.pop('self'); locals_dict.pop('env_fn')
+        locals_dict = serialize_locals(locals_dict)
+
+        writer = SummaryWriter(log_dir=log_dir)
+        writer.add_hparams(locals_dict, {}, run_name=f'../{os.path.basename(writer.get_logdir())}')
+        save_dir = os.path.join(writer.get_logdir(), 'pyt_save')
+        os.makedirs(save_dir, exist_ok=True)
+            
         np.random.seed(seed)
         torch.manual_seed(seed)
         
-        env = env_fn()
+        env = AsyncVectorEnv(env_fn)
         if len(model_path) > 0:
             ac_mod = torch.load(model_path)
         else:
             ac_mod = ac(env, **ac_kwargs)
+        writer.add_graph(ac_mod, torch.randn(size=env.observation_space.shape))
 
-        local_buf_size = buf_size//num_procs()
-        buf = VPGBuffer(env, local_buf_size, num_epochs, 
-                        gamma=gamma, lam=lam)
+        buf = VPGBuffer(env, buf_size, gamma=gamma, lam=lam)
+        local_buf_size = buf_size // env.num_envs
         
-        sync_params(ac_mod)
         pi_optim = Adam(ac_mod.actor.parameters(), lr=pi_lr)
         val_optim = Adam(ac_mod.critic.parameters(), lr=val_lr)
-        logger.setup_pytorch_saver(ac_mod)
 
-        obs = env.reset()
-        ep_len, ep_ret = 0, 0
+        obs, _ = env.reset(seed=seed)
+        ep_len, ep_ret = np.zeros(env.num_envs, dtype=np.int64), 0
+        ep_lens, ep_rets = [], []
         start_time = time.time()
+        autoreset = np.zeros(env.num_envs)
 
         for epoch in range(num_epochs):
             for step in range(local_buf_size):
                 act, val, logp = ac_mod.step(torch.as_tensor(obs, dtype=torch.float32))
+                obs_next, rew, terminated, truncated, _ = env.step(act)
                 
-                obs_next, rew, done, _ = env.step(act)
-                buf.update_buffer(obs, act, rew, val, logp, ep_len)
-                logger.store(VVals=val)
+                for env_id in range(env.num_envs):
+                    if not autoreset[env_id]:
+                        buf.update_buffer(env_id, obs[env_id], act[env_id], rew[env_id], 
+                                          val[env_id], logp[env_id], step)
                 obs, ep_len = obs_next, ep_len + 1
 
                 epoch_done = step == (local_buf_size-1)
-                max_ep_len_reached = ep_len == max_ep_len
+                autoreset = np.logical_or(terminated, truncated)
 
-                if epoch_done or max_ep_len_reached or done:
-                    val_terminal = 0 if done else ac_mod.critic(torch.as_tensor(obs, dtype=torch.float32))
-                    ep_ret = buf.terminate_ep(ep_len, val_terminal, epoch_done)
-                    logger.store(EpRet=ep_ret, EpLen=ep_len)
-                    obs = env.reset()
-                    ep_len, ep_ret = 0, 0
+                if np.any(autoreset):
+                    for env_id in range(env.num_envs):
+                        if autoreset[env_id]:
+                            val_terminal = 0 if terminated[env_id] else ac_mod.critic(
+                                torch.as_tensor(obs[env_id], dtype=torch.float32)).numpy()
+                            ep_ret = buf.terminate_ep(env_id, ep_len[env_id], val_terminal)
+                            ep_lens.append(ep_len[env_id])
+                            ep_rets.append(ep_ret)
+                            ep_len[env_id] = 0
+                
+                if epoch_done:
+                    obs, _ = env.reset()
+                    buf.terminate_epoch()
+                    ep_len = np.zeros_like(ep_len)
+            
+            self.__update_params(train_v_iters, epoch+1, ac_mod, pi_optim, 
+                                 val_optim, writer, buf)
             
             if (epoch % save_freq) == 0:
-                logger.save_state({'env': env})
+                torch.save(ac_mod, os.path.join(save_dir, 'model.pt'))
             if ((epoch + 1) % checkpoint_freq) == 0:
-                logger.save_state({'env': env}, itr=epoch+1)
+                torch.save(ac_mod, os.path.join(save_dir, f'model{epoch+1}.pt'))
                 
-            self.__update_params(train_v_iters, ac_mod, pi_optim, val_optim, 
-                                 logger, buf)
 
             # Log info about epoch
-            logger.log_tabular('Epoch', epoch)
-            logger.log_tabular('EpRet', with_min_and_max=True)
-            logger.log_tabular('EpLen', average_only=True)
-            logger.log_tabular('VVals', with_min_and_max=True)
-            logger.log_tabular('TotalEnvInteracts', (epoch+1)*buf_size)
-            logger.log_tabular('LossPi', average_only=True)
-            logger.log_tabular('LossV', average_only=True)
-            logger.log_tabular('DeltaLossPi', average_only=True)
-            logger.log_tabular('DeltaLossV', average_only=True)
-            logger.log_tabular('Entropy', average_only=True)
-            logger.log_tabular('KL', average_only=True)
-            logger.log_tabular('Time', time.time()-start_time)
-            logger.dump_tabular()
+            if len(ep_rets) > 0:
+                ep_lens, ep_rets = np.array(ep_lens), np.array(ep_rets)
+                writer.add_scalar('EpLen/mean', ep_lens.mean(), (epoch+1)*buf_size)
+                writer.add_scalar('EpRet/mean', ep_rets.mean(), (epoch+1)*buf_size)
+                writer.add_scalar('EpRet/max', ep_rets.max(), (epoch+1)*buf_size)
+                writer.add_scalar('EpRet/min', ep_rets.min(), (epoch+1)*buf_size)
+                ep_lens, ep_rets = [], []
+            writer.add_scalar('VVals/mean', buf.val.mean(), epoch+1)
+            writer.add_scalar('VVals/max', buf.val.max(), epoch+1)
+            writer.add_scalar('VVals/min', buf.val.min(), epoch+1)
+            writer.add_scalar('Time', time.time()-start_time, epoch+1)
+            writer.flush()
         
         # Save final model
-        logger.save_state({'env': env})
+        torch.save(ac_mod, os.path.join(save_dir, 'model.pt'))
+        writer.close()
         print(f'Model {num_epochs} (final) saved successfully')
                 
 
@@ -208,29 +236,27 @@ if __name__ == '__main__':
     parser.add_argument('--val_lr', type=float, default=1e-3)
     parser.add_argument('--cpu', type=int, default=4)
     parser.add_argument('--steps', type=int, default=4000)
-    parser.add_argument('--ep_max_len', type=int, default=1000)
+    parser.add_argument('--max_ep_len', type=int, default=-1)
     parser.add_argument('--epochs', type=int, default=100)
     parser.add_argument('--save_freq', type=int, default=10)
-    parser.add_argument('--checkpoint_freq', type=int, default=20)
-    parser.add_argument('--exp_name', type=str, default='vpg_custom')
+    parser.add_argument('--checkpoint_freq', type=int, default=25)
+    parser.add_argument('--exp_name', type=str, default='vpg')
     args = parser.parse_args()
 
-    mpi_fork(args.cpu)  # run parallel code with mpi
-    
-    from spinup.utils.run_utils import setup_logger_kwargs
-    data_dir = os.getcwd() + '/../data/vpg/' + args.env + '/'
-    logger_kwargs = setup_logger_kwargs(args.exp_name, data_dir=data_dir, seed=args.seed)
+    log_dir = os.getcwd() + '/../runs/vpg/' + args.env + '/'
+    log_dir += args.exp_name + '/' + args.exp_name + f'_s{args.seed}'
 
     ac_kwargs = dict(hidden_sizes_actor=[args.hid_act]*args.l, 
                     hidden_sizes_critic=[args.hid_cri]*args.l,
                     hidden_acts_actor=torch.nn.Tanh, 
                     hidden_acts_critic=torch.nn.Tanh)
+    
+    max_ep_len = args.max_ep_len if args.max_ep_len > 0 else None
+    env_fn = [lambda: gym.make(args.env, max_episode_steps=max_ep_len)] * args.cpu
 
     trainer = VPGTrainer()
-    trainer.train_mod(lambda : gym.make(args.env), model_path=args.model_path, 
-                      ac=MLPActorCritic, ac_kwargs=ac_kwargs, seed=args.seed, 
-                      buf_size=args.steps, max_ep_len=args.ep_max_len, 
+    trainer.train_mod(env_fn, model_path=args.model_path, ac=MLPActorCritic, 
+                      ac_kwargs=ac_kwargs, seed=args.seed, buf_size=args.steps, 
                       num_epochs=args.epochs, gamma=args.gamma, lam=args.lam, 
-                      pi_lr=args.pi_lr, val_lr=args.val_lr, 
-                      logger_kwargs=logger_kwargs, save_freq=args.save_freq, 
-                      checkpoint_freq=args.checkpoint_freq)
+                      pi_lr=args.pi_lr, val_lr=args.val_lr, log_dir=log_dir, 
+                      save_freq=args.save_freq, checkpoint_freq=args.checkpoint_freq)
