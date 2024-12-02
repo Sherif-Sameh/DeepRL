@@ -122,10 +122,10 @@ class VPGTrainer:
         # Log epoch statistics
         logp = ac_mod.actor.log_prob_no_grad(torch.as_tensor(buf.act.reshape(buf.buf_size, -1)))
         approx_kl = np.mean(buf.logp.reshape(-1) - logp.numpy()).item()
-        writer.add_scalar('Loss/LossPi', loss_pi_old.item(), epoch)
-        writer.add_scalar('Loss/LossV', loss_val_old.item(), epoch)
-        writer.add_scalar('Pi/KL', approx_kl, epoch)
-        writer.add_scalar('Pi/Entropy', ent_pi, epoch)
+        writer.add_scalar('Loss/LossPi', loss_pi_old.item(), epoch+1)
+        writer.add_scalar('Loss/LossV', loss_val_old.item(), epoch+1)
+        writer.add_scalar('Pi/KL', approx_kl, epoch+1)
+        writer.add_scalar('Pi/Entropy', ent_pi, epoch+1)
 
 
     def train_mod(self, env_fn, model_path='', ac=MLPActorCritic, ac_kwargs=dict(), 
@@ -192,7 +192,7 @@ class VPGTrainer:
                     buf.terminate_epoch()
                     ep_len = np.zeros_like(ep_len)
             
-            self.__update_params(train_v_iters, epoch+1, ac_mod, pi_optim, 
+            self.__update_params(train_v_iters, epoch, ac_mod, pi_optim, 
                                  val_optim, writer, buf)
             
             if (epoch % save_freq) == 0:
@@ -243,7 +243,7 @@ if __name__ == '__main__':
     parser.add_argument('--exp_name', type=str, default='vpg')
     args = parser.parse_args()
 
-    log_dir = os.getcwd() + '/../runs/vpg/' + args.env + '/'
+    log_dir = os.getcwd() + '/../runs/' + args.env + '/'
     log_dir += args.exp_name + '/' + args.exp_name + f'_s{args.seed}'
 
     ac_kwargs = dict(hidden_sizes_actor=[args.hid_act]*args.l, 

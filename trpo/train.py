@@ -167,15 +167,15 @@ class PolicyOptimizer:
             
             kl = actor.kl_divergence_no_grad(pi_curr)
             if (surr_obj > self.surr_obj_min) and (kl <= self.delta):
-                writer.add_scalar('Pi/BacktrackIters', i, epoch)
-                writer.add_scalar('Pi/KL', kl.item(), epoch)
+                writer.add_scalar('Pi/BacktrackIters', i, epoch+1)
+                writer.add_scalar('Pi/KL', kl.item(), epoch+1)
             
                 return surr_obj
                     
         # Backtracking failed so reload old params
         nn.utils.vector_to_parameters(params_curr, actor.net.parameters())
-        writer.add_scalar('Pi/BacktrackIters', self.backtrack_iters, epoch)
-        writer.add_scalar('Pi/KL', 0, epoch)
+        writer.add_scalar('Pi/BacktrackIters', self.backtrack_iters, epoch+1)
+        writer.add_scalar('Pi/KL', 0, epoch+1)
         self.backtrack_fail_ctr += 1
         
         return np.zeros(1)
@@ -214,8 +214,8 @@ class TRPOTrainer:
             val_optim.step()
 
         # Log epoch statistics
-        writer.add_scalar('Loss/LossPi', loss_pi.item(), epoch)
-        writer.add_scalar('Loss/LossV', loss_val.item(), epoch)
+        writer.add_scalar('Loss/LossPi', loss_pi.item(), epoch+1)
+        writer.add_scalar('Loss/LossV', loss_val.item(), epoch+1)
     
     def train_mod(self, env_fn, model_path='', ac=MLPActorCritic, ac_kwargs=dict(), 
                   seed=0, steps_per_epoch=4000, epochs=50, gamma=0.99, delta=0.01, 
@@ -350,7 +350,7 @@ if __name__ == '__main__':
     args = parser.parse_args()
 
     # Set directory for logging
-    log_dir = os.getcwd() + '/../runs/trpo/' + args.env + '/'
+    log_dir = os.getcwd() + '/../runs/' + args.env + '/'
     log_dir += args.exp_name + '/' + args.exp_name + f'_s{args.seed}'
 
     # Actor-Critic kwargs

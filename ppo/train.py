@@ -172,13 +172,13 @@ class PPOTrainer:
                 val_optim.step()
 
         # Log epoch statistics
-        writer.add_scalar('Loss/LossPi', loss_pi.item(), epoch)
-        writer.add_scalar('Loss/LossV', loss_val.item(), epoch)
-        writer.add_scalar('Pi/KL', kl.item(), epoch)
+        writer.add_scalar('Loss/LossPi', loss_pi.item(), epoch+1)
+        writer.add_scalar('Loss/LossV', loss_val.item(), epoch+1)
+        writer.add_scalar('Pi/KL', kl.item(), epoch+1)
 
     
     def train_mod(self, env_fn, model_path='', ac=MLPActorCritic, ac_kwargs=dict(), seed=0,
-                  steps_per_epoch=4000, batch_size=100, epochs=50, gamma=0.99, 
+                  steps_per_epoch=4000, batch_size=400, epochs=50, gamma=0.99, 
                   clip_ratio=0.2, pi_lr=3e-4, vf_lr=1e-3, train_pi_iters=80, 
                   train_v_iters=80, lam=0.97, target_kl=0.01, log_dir=None, 
                   save_freq=10, checkpoint_freq=25):
@@ -289,7 +289,7 @@ if __name__ == '__main__':
     parser.add_argument('--l', type=int, default=2)
     parser.add_argument('--seed', '-s', type=int, default=0)
     parser.add_argument('--steps', type=int, default=4000)
-    parser.add_argument('--batch_size', type=int, default=100)
+    parser.add_argument('--batch_size', type=int, default=400)
     parser.add_argument('--epochs', type=int, default=100)
     parser.add_argument('--gamma', type=float, default=0.99)
     parser.add_argument('--clip_ratio', type=float, default=0.2)
@@ -307,7 +307,7 @@ if __name__ == '__main__':
     args = parser.parse_args()
 
     # Set directory for logging
-    log_dir = os.getcwd() + '/../runs/ppo/' + args.env + '/'
+    log_dir = os.getcwd() + '/../runs/' + args.env + '/'
     log_dir += args.exp_name + '/' + args.exp_name + f'_s{args.seed}'
 
     # Actor-Critic kwargs

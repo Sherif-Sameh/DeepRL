@@ -6,11 +6,12 @@ import gymnasium as gym
 import torch
 
 class VideoRecorder(gym.Wrapper):
-    def __init__(self, env, output_dir="./videos/", fps=30):
+    def __init__(self, env, output_dir="./videos/", exp_name='', fps=30):
         super().__init__(env)
         self.frames = [] 
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
+        self.exp_name = exp_name
         self.fps = fps  
 
     def render(self):
@@ -25,7 +26,7 @@ class VideoRecorder(gym.Wrapper):
             return
 
         # Define video file path
-        video_path = self.output_dir / f'{str(datetime.datetime.now())}.mp4'
+        video_path = self.output_dir / f'{self.exp_name}_{str(datetime.datetime.now())}.mp4'
 
         # Get the height and width from the first frame
         height, width, _ = self.frames[0].shape
@@ -49,7 +50,7 @@ if __name__ == '__main__':
     parser.add_argument('--itr', type=int, default=-1)
     parser.add_argument('--num_episodes', type=int, default=100)
     parser.add_argument('--record', type=bool, default=False)
-    parser.add_argument('--video_dir', type=str, default='../video/vpg/')
+    parser.add_argument('--video_dir', type=str, default='../video/')
     parser.add_argument('--video_fps', type=int, default=30)
     args = parser.parse_args()
 
@@ -62,9 +63,10 @@ if __name__ == '__main__':
     env = gym.make(args.env, render_mode=render_mode)
     env.metadata['render_fps'] = args.video_fps
     if args.record == True:
+        exp_name = os.path.basename(args.data[:-1])
         env_name = getattr(env.unwrapped.spec, "id", env.unwrapped.__class__.__name__)
         video_dir = os.path.join(args.video_dir, f'{env_name}')
-        env = VideoRecorder(env, video_dir, fps=args.video_fps)
+        env = VideoRecorder(env, video_dir, exp_name=exp_name, fps=args.video_fps)
 
     for ep in range(args.num_episodes):
         (obs, _), done = env.reset(), False

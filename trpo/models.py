@@ -1,5 +1,5 @@
 import numpy as np
-import gymnasium as gym
+from gymnasium.vector import VectorEnv
 from gymnasium.spaces import Box, Discrete
 
 import torch
@@ -223,7 +223,7 @@ class MLPCritic(MLP):
         return torch.squeeze(self.net(obs), -1)
 
 class MLPActorCritic(nn.Module):
-    def __init__(self, env, hidden_sizes_actor, hidden_sizes_critic,
+    def __init__(self, env: VectorEnv, hidden_sizes_actor, hidden_sizes_critic,
                  hidden_acts_actor, hidden_acts_critic):
         super().__init__()
         obs_dim = env.single_observation_space.shape[0]

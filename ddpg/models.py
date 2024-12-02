@@ -1,6 +1,6 @@
 import numpy as np
-import gym
-from gym.spaces import Box
+from gymnasium.vector import VectorEnv
+from gymnasium.spaces import Box
 from copy import deepcopy
 
 import torch
@@ -18,7 +18,7 @@ def polyak_average(params, target_params, polyak):
             param_target.data.add_(param.data, alpha=1-polyak)
 
 class MLP(nn.Module):
-    def __init__(self, obs_dim, hidden_sizes, hidden_acts, use_BN=False):
+    def __init__(self, prefix, obs_dim, hidden_sizes, hidden_acts):
         super().__init__()
         self.obs_dim = obs_dim
 
@@ -31,43 +31,40 @@ class MLP(nn.Module):
         # Initialize all hidden layers
         hidden_sizes = [obs_dim] + hidden_sizes
         self.net = nn.Sequential()
-        if use_BN == True:
-            self.net.add_module(f'batch_norm_0', nn.BatchNorm1d(obs_dim))
         for i in range(len(hidden_sizes)-1):
-            self.net.add_module(f'hidden_{i+1}', nn.Linear(hidden_sizes[i], 
-                                                           hidden_sizes[i+1]))
-            if use_BN == True:
-                self.net.add_module(f'batch_norm_{i+1}', nn.BatchNorm1d(hidden_sizes[i+1]))
-            self.net.add_module(f'activation_{i+1}', hidden_acts[i]())
+            self.net.add_module(prefix + f'_hidden_{i+1}', nn.Linear(hidden_sizes[i], 
+                                                                     hidden_sizes[i+1]))
+            self.net.add_module(prefix + f'_activation_{i+1}', hidden_acts[i]())
 
         # Initialize all parameters of hidden layers
         self.net.apply(lambda m: init_weights(m, gain=1.0))
     
     def layer_summary(self):
-        self.net.eval()
         x = torch.randn((1, self.obs_dim))
         for layer in self.net:
             input_shape = x.shape
             x = layer(x)
             print(layer.__class__.__name__, 'input & output shapes:\t', input_shape, x.shape)
         print('\n')
-        self.net.train()
+
+    def forward(self, obs):
+        raise NotImplementedError
 
 
 class MLPDQN(MLP):
-    def __init__(self, obs_dim, act_dim, hidden_sizes, hidden_acts, use_BN=False):
+    def __init__(self, obs_dim, act_dim, hidden_sizes, hidden_acts):
         # Initialize MLP hidden layers (except final hidden layer)
-        super().__init__(obs_dim, hidden_sizes[:-1], hidden_acts, use_BN=use_BN)
+        super().__init__('critic', obs_dim, hidden_sizes[:-1], hidden_acts)
         self.act_dim = act_dim
 
         # Initialize final hidden layer (feed in actions)
         final_act = hidden_acts[-1] if isinstance(hidden_acts, list) else hidden_acts
-        self.net.add_module(f'hidden_{len(hidden_sizes)}', nn.Linear(hidden_sizes[-2] + act_dim, 
-                                                           hidden_sizes[-1]))
-        self.net.add_module(f'activation_{len(hidden_sizes)}', final_act())
+        self.net.add_module(f'critic_hidden_{len(hidden_sizes)}', nn.Linear(hidden_sizes[-2] + act_dim, 
+                                                                            hidden_sizes[-1]))
+        self.net.add_module(f'critic_activation_{len(hidden_sizes)}', final_act())
 
         # Add the output layer to the network and intialize its weights 
-        self.net.add_module('output', nn.Linear(hidden_sizes[-1], 1))
+        self.net.add_module('critic_output', nn.Linear(hidden_sizes[-1], 1))
         self.net[-3:].apply(lambda m: init_weights(m, gain=1.0))
 
         # Create and initialize target Q network
@@ -95,7 +92,6 @@ class MLPDQN(MLP):
             param.requires_grad = val
 
     def layer_summary(self):
-        self.net.eval()
         x = torch.randn((1, self.obs_dim))
         for layer in self.net[:-3]:
             input_shape = x.shape
@@ -108,19 +104,17 @@ class MLPDQN(MLP):
             x = layer(x)
             print(layer.__class__.__name__, 'input & output shapes:\t', input_shape, x.shape)
         print('\n')
-        self.net.train()
         
 
 class MLPActor(MLP):
-    def __init__(self, obs_dim, act_dim, hidden_sizes, hidden_acts, 
-                 action_max, use_BN=False):
+    def __init__(self, obs_dim, act_dim, hidden_sizes, hidden_acts, action_max):
         # Initialize MLP hidden layers
         self.action_max = action_max
-        super().__init__(obs_dim, hidden_sizes, hidden_acts, use_BN=use_BN)
+        super().__init__('actor', obs_dim, hidden_sizes, hidden_acts)
 
         # Add the output layer to the network and intialize its weights 
-        self.net.add_module('output', nn.Linear(hidden_sizes[-1], act_dim))
-        self.net.add_module('output_act', nn.Tanh())
+        self.net.add_module('actor_output', nn.Linear(hidden_sizes[-1], act_dim))
+        self.net.add_module('actor_output_act', nn.Tanh())
         self.net[-2:].apply(lambda m: init_weights(m, gain=0.01))
 
         # Create and initialize target actor network
@@ -139,40 +133,46 @@ class MLPActor(MLP):
 
 
 class MLPActorCritic(nn.Module):
-    def __init__(self, env: gym.Env, hidden_sizes_actor, hidden_sizes_critic,
-                 hidden_acts_actor, hidden_acts_critic, action_std, use_BN=False):
+    def __init__(self, env: VectorEnv, hidden_sizes_actor, hidden_sizes_critic,
+                 hidden_acts_actor, hidden_acts_critic, action_std):
         super().__init__()
         self.action_std = action_std
-        self.action_max = torch.tensor(env.action_space.high) 
+        self.action_max = torch.tensor(env.single_action_space.high) 
 
         # Check the action space type and initialize the actor
-        if isinstance(env.action_space, Box):
-            obs_dim = env.observation_space.shape[0]
-            act_dim = env.action_space.shape[0]
+        if isinstance(env.single_action_space, Box):
+            obs_dim = env.single_observation_space.shape[0]
+            act_dim = env.single_action_space.shape[0]
             self.actor = MLPActor(obs_dim, act_dim, hidden_sizes_actor, 
-                                  hidden_acts_actor, self.action_max, use_BN=use_BN)
+                                  hidden_acts_actor, self.action_max)
         else:
             raise NotImplementedError
         
         # Initialize the critic (DQN)
         self.critic = MLPDQN(obs_dim, act_dim, hidden_sizes_critic,
-                             hidden_acts_critic, use_BN=use_BN)
+                             hidden_acts_critic)
         
     def step(self, obs):
         with torch.no_grad():
-            obs = torch.unsqueeze(obs, dim=0)
             act = self.actor.forward(obs)
             act = torch.max(torch.min(act + self.action_std * torch.randn_like(act), 
                                       self.action_max), -self.action_max)
             q_val = self.critic.forward(obs, act)
 
-        return act.numpy().squeeze(axis=0), q_val.numpy().squeeze(axis=0)
+        return act.numpy(), q_val.numpy().squeeze()
     
     def act(self, obs):
         with torch.no_grad():
-            act = self.actor.forward(torch.unsqueeze(obs, dim=0))
+            act = self.actor.forward(obs)
         
-        return act.numpy().squeeze(axis=0)
+        return act.numpy()
+    
+    # Only for tracing the actor and critic's networks for tensorboard
+    def forward(self, obs):
+        act = self.actor(obs)
+        q_val = self.critic(obs, act)
+
+        return act, q_val
     
     def layer_summary(self):
         print('Actor Summary: \n')
