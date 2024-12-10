@@ -7,7 +7,7 @@ from copy import deepcopy
 import torch
 from torch import nn
 
-from mlp import init_weights, DuelingQLayer
+from .mlp import init_weights, DuelingQLayer
 
 class FeatureExtractor(nn.Module):
     def __init__(self, obs_dim, in_channels, out_channels, kernel_sizes, strides, features_out):
@@ -27,7 +27,7 @@ class FeatureExtractor(nn.Module):
         # Initialize all convolutional layers
         self.net = nn.Sequential()
         channels = [in_channels] + out_channels
-        for i in range(kernel_sizes):
+        for i in range(len(kernel_sizes)):
             self.net.add_module(f'fe_conv_{i+1}', nn.Conv2d(channels[i], channels[i+1], 
                                                             kernel_size=kernel_sizes[i],
                                                             stride=strides[i], padding=0))
@@ -100,11 +100,11 @@ class CNNDQN(nn.Module):
 
     def __eps_greedy(self, obs):
         with torch.no_grad():
-            r1 = torch.rand(size=(obs.shape[0],))
+            r1 = torch.rand(size=(obs.shape[0],), device=obs.device)
             q_vals = self.q_head(self.feature_ext(obs))
             
             # Random actions
-            rand_a = torch.randint(0, q_vals.shape[-1], size=(obs.shape[0],))
+            rand_a = torch.randint(0, q_vals.shape[-1], size=(obs.shape[0],), device=obs.device)
             
             # Greedy actions
             greedy_a = torch.argmax(q_vals, dim=-1)

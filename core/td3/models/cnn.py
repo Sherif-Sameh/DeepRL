@@ -6,7 +6,7 @@ from copy import deepcopy
 import torch
 from torch import nn
 
-from mlp import init_weights, polyak_average
+from .mlp import init_weights, polyak_average
 
 class FeatureExtractor(nn.Module):
     def __init__(self, obs_dim, in_channels, out_channels, 
@@ -27,7 +27,7 @@ class FeatureExtractor(nn.Module):
         # Initialize all convolutional layers
         self.net = nn.Sequential()
         channels = [in_channels] + out_channels
-        for i in range(kernel_sizes):
+        for i in range(len(kernel_sizes)):
             self.net.add_module(f'fe_conv_{i+1}', nn.Conv2d(channels[i], channels[i+1], 
                                                             kernel_size=kernel_sizes[i],
                                                             stride=strides[i], padding=0))
@@ -106,7 +106,7 @@ class CNNCritic(nn.Module):
             param.requires_grad = val
 
     def layer_summary(self):
-        x = torch.randn((1, self.feature_ext.features_out + self.act_dim), device=torch.float32)
+        x = torch.randn((1, self.feature_ext.features_out + self.act_dim), dtype=torch.float32)
         for layer in self.critic_head:
             input_shape = x.shape
             x = layer(x)
@@ -148,13 +148,15 @@ class CNNActor(nn.Module):
     def forward_target(self, obs):
         with torch.no_grad():
             a = self.actor_head_target(self.feature_ext_target(obs)) * self.action_max
+        
+        return a
 
     def update_target(self, polyak):
         polyak_average(self.feature_ext.parameters(), self.feature_ext_target.parameters(), polyak)
         polyak_average(self.actor_head.parameters(), self.actor_head_target.parameters(), polyak)
     
     def layer_summary(self):
-        x = torch.randn((1, self.feature_ext.features_out), device=torch.float32)
+        x = torch.randn((1, self.feature_ext.features_out), dtype=torch.float32)
         for layer in self.actor_head:
             input_shape = x.shape
             x = layer(x)
@@ -196,7 +198,7 @@ class CNNActorCritic(nn.Module):
             act = self.actor.actor_head(features)
             act = torch.max(torch.min(act + self.action_std * torch.randn_like(act),
                                       self.action_max), -self.action_max)
-            q_val = self.critic.critic_head(torch.cat([features, act], dim=1))
+            q_val = self.critic_1.critic_head(torch.cat([features, act], dim=1))
         
         return act.cpu().numpy(), q_val.cpu().numpy().squeeze()
 

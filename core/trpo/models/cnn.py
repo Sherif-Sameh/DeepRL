@@ -9,7 +9,7 @@ from torch import nn
 from torch.distributions.categorical import Categorical
 from torch.distributions.normal import Normal
 
-from mlp import init_weights
+from .mlp import init_weights
 
 class FeatureExtractor(nn.Module):
     def __init__(self, obs_dim, in_channels, out_channels, kernel_sizes, strides, features_out):
@@ -29,7 +29,7 @@ class FeatureExtractor(nn.Module):
         # Initialize all convolutional layers
         self.net = nn.Sequential()
         channels = [in_channels] + out_channels
-        for i in range(kernel_sizes):
+        for i in range(len(kernel_sizes)):
             self.net.add_module(f'fe_conv_{i+1}', nn.Conv2d(channels[i], channels[i+1], 
                                                             kernel_size=kernel_sizes[i],
                                                             stride=strides[i], padding=0))
@@ -128,7 +128,7 @@ class CNNActor(nn.Module):
 
     def layer_summary(self):
         print(self.actor_head[0].__class__.__name__, 'input & output shapes:\t', 
-              f'(1, {self.feature_ext.features_out})', f'(1, {self.act_dim})')
+              f'(1, {self.feature_ext.features_out})', f'(1, {self.act_dim})\n')
         
 
 class CNNActorDiscrete(CNNActor):
@@ -269,16 +269,16 @@ class CNNCritic(nn.Module):
         
     def forward(self, obs):
         with torch.no_grad():
-            v = torch.squeeze(self.critic_head(self.feature_ext(obs)), -1)
+            v = torch.squeeze(self.critic_head(self.feature_ext(obs)))
         
         return v
     
     def forward_grad(self, obs):
-        return torch.squeeze(self.critic_head(self.feature_ext(obs)), -1)
+        return torch.squeeze(self.critic_head(self.feature_ext(obs)))
 
     def layer_summary(self):
         print(self.critic_head[0].__class__.__name__, 'input & output shapes:\t', 
-              f'(1, {self.feature_ext.features_out})', '(1, 1)')
+              f'(1, {self.feature_ext.features_out})', '(1, 1)\n')
     
 class CNNActorCritic(nn.Module):
     def __init__(self, env: VectorEnv, in_channels, out_channels, 

@@ -4,7 +4,7 @@ import torch
 import numpy as np
 import gymnasium as gym
 from gymnasium.wrappers import FrameStackObservation, GrayscaleObservation
-from core.ppo.models.mlp import MLPActorCritic
+from core.ppo.models.cnn import CNNActorCritic
 
 class SkipAndScaleObservation(gym.Wrapper):
     def __init__(self, env, skip=4):
@@ -28,9 +28,12 @@ env_fn = lambda: gym.make("CarRacing-v3", render_mode="human", lap_complete_perc
                        domain_randomize=False, continuous=False)
 env_fn_wrapped = lambda: FrameStackObservation(SkipAndScaleObservation(GrayscaleObservation(env_fn())), stack_size=4)
 env = gym.vector.AsyncVectorEnv([env_fn_wrapped] * 4)
-ac = MLPActorCritic(env, [128, 128], [128, 128], torch.nn.ReLU, torch.nn.ReLU)
+ac = CNNActorCritic(env, 4, [32, 32], [8, 4], [4, 2], 512)
+for name, param in ac.actor.named_parameters():
+    print(name)
 
 if __name__ == '__main__':
+    exit()
     for episode in range(10):
         env.reset()
         total_reward = 0.0

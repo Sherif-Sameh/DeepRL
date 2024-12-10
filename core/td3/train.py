@@ -1,4 +1,5 @@
 import os
+import glob
 import inspect
 import gymnasium as gym
 from gymnasium.vector import AsyncVectorEnv
@@ -170,8 +171,8 @@ class TD3Trainer:
         ac_optim.step()
 
         # Update target critic networks
-        ac.critic_1.update_target()
-        ac.critic_2.update_target()
+        ac.critic_1.update_target(polyak)
+        ac.critic_2.update_target(polyak)
 
         # Log training statistics
         writer.add_scalar('Loss/LossQ1', loss_q1.item(), epoch+1)
@@ -187,7 +188,7 @@ class TD3Trainer:
             ac.critic_1.set_grad_tracking(val=True)
 
             # Update target network
-            ac.actor.update_target()
+            ac.actor.update_target(polyak)
             
             # Log training statistics
             writer.add_scalar('Loss/LossPi', loss_pi.item(), epoch+1)
@@ -240,7 +241,7 @@ class TD3Trainer:
         buf = ReplayBuffer(env, buf_size, batch_size)    
 
         # Store action limits for target action clipping
-        action_max = torch.tensor(env.single_action_space.high) 
+        action_max = torch.tensor(env.single_action_space.high).to(device)
 
         # Initialize optimizer and scheduler
         ac_optim = Adam(ac_mod.parameters(), lr=lr)
@@ -368,6 +369,16 @@ if __name__ == '__main__':
     # Set directory for logging
     log_dir = os.getcwd() + '/../../runs/' + args.env + '/'
     log_dir += args.exp_name + '/' + args.exp_name + f'_s{args.seed}'
+
+    # Remove existing logs if run already exists
+    if os.path.exists(log_dir) and os.path.isdir(log_dir):
+        print('Warning: run already exists. Deleting previous logs... \n')
+        files = glob.glob(os.path.join(log_dir, 'events.*'))
+        for f in files:
+            try:
+                os.remove(f)
+            except Exception as e:
+                print(f'Failed to delete {f}. Reason {e}')
 
     # Determine type of policy and setup its arguments and environment
     max_ep_len = args.max_ep_len if args.max_ep_len > 0 else None

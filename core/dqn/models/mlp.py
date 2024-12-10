@@ -73,11 +73,11 @@ class MLPDQN(MLP):
 
     def __eps_greedy(self, obs):
         with torch.no_grad():
-            r1 = torch.rand(size=(obs.shape[0],))
+            r1 = torch.rand(size=(obs.shape[0],), device=obs.device)
             q_vals = self.net(obs)
             
             # Random actions
-            rand_a = torch.randint(0, q_vals.shape[-1], size=(obs.shape[0],))
+            rand_a = torch.randint(0, q_vals.shape[-1], size=(obs.shape[0],), device=obs.device)
             
             # Greedy actions
             greedy_a = torch.argmax(q_vals, dim=-1)

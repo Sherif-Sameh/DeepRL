@@ -111,8 +111,8 @@ class MLPActor(MLP):
     def __init__(self, obs_dim, act_dim, hidden_sizes, hidden_acts, 
                  action_max):
         # Initialize MLP hidden layers
-        self.action_max = action_max
         super().__init__('actor', obs_dim, hidden_sizes, hidden_acts)
+        self.action_max = action_max
 
         # Add the output layer to the network and intialize its weights 
         self.net.add_module('actor_output', nn.Linear(hidden_sizes[-1], act_dim))

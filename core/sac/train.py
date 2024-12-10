@@ -1,4 +1,5 @@
 import os
+import glob
 import inspect
 import gymnasium as gym
 from gymnasium.vector import AsyncVectorEnv
@@ -409,6 +410,16 @@ if __name__ == '__main__':
     # Set directory for logging
     log_dir = os.getcwd() + '/../../runs/' + args.env + '/'
     log_dir += args.exp_name + '/' + args.exp_name + f'_s{args.seed}'
+
+    # Remove existing logs if run already exists
+    if os.path.exists(log_dir) and os.path.isdir(log_dir):
+        print('Warning: run already exists. Deleting previous logs... \n')
+        files = glob.glob(os.path.join(log_dir, 'events.*'))
+        for f in files:
+            try:
+                os.remove(f)
+            except Exception as e:
+                print(f'Failed to delete {f}. Reason {e}')
 
     # Determine type of policy and setup its arguments and environment
     max_ep_len = args.max_ep_len if args.max_ep_len > 0 else None

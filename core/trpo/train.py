@@ -1,4 +1,5 @@
 import os
+import glob
 import inspect
 import gymnasium as gym
 from gymnasium.vector import AsyncVectorEnv
@@ -125,7 +126,7 @@ class ConjugateGradient:
     def conj_grad(self, policy_grad: np.ndarray, actor, device):
         # Calculate the gradient of KL-Divergence
         kl = actor.kl_divergence_grad()
-        kl_grad = autograd.grad(outputs=kl, inputs=actor.net.parameters(), create_graph=True, retain_graph=True)
+        kl_grad = autograd.grad(outputs=kl, inputs=actor.parameters(), create_graph=True, retain_graph=True)
         kl_grad = torch.cat([g.flatten() for g in kl_grad])
 
         # Initialize parameters for CG algorithm
@@ -154,7 +155,7 @@ class ConjugateGradient:
     def mat_vec_prod(self, kl_grad: torch.Tensor, v: torch.Tensor,
                       actor, retain_graph=False):
         out = torch.dot(kl_grad, v)
-        grad = autograd.grad(outputs=out, inputs=actor.net.parameters(), 
+        grad = autograd.grad(outputs=out, inputs=actor.parameters(), 
                              retain_graph=retain_graph)
         grad = torch.cat([g.flatten() for g in grad]) + self.damping_coeff * v
 
@@ -176,14 +177,14 @@ class PolicyOptimizer:
             pi_curr = torch.distributions.Categorical(logits=actor.pi.logits)
         elif isinstance(actor.pi, torch.distributions.Normal):
             pi_curr = torch.distributions.Normal(loc=actor.pi.mean, scale=actor.pi.stddev)
-        params_curr = nn.utils.parameters_to_vector(actor.net.parameters())
+        params_curr = nn.utils.parameters_to_vector(actor.parameters())
 
         # Perform the backtracking line search
         max_step = np.sqrt((2 * self.delta)/(np.dot(x, Hx) + np_eps))
         for i in range(self.backtrack_iters):
             offset = self.backtrack_coeff**i * max_step * x
             nn.utils.vector_to_parameters(params_curr + torch.as_tensor(offset, dtype=torch.float32, device=device), 
-                                          actor.net.parameters())
+                                          actor.parameters())
             surr_obj = actor.surrogate_obj(torch.as_tensor(buf.obs.reshape((-1,)+buf.obs_shape), 
                                                            dtype=torch.float32, device=device),
                                            torch.as_tensor(buf.act.reshape((-1,)+buf.act_shape), 
@@ -198,7 +199,7 @@ class PolicyOptimizer:
                 return surr_obj
                     
         # Backtracking failed so reload old params
-        nn.utils.vector_to_parameters(params_curr, actor.net.parameters())
+        nn.utils.vector_to_parameters(params_curr, actor.parameters())
         writer.add_scalar('Pi/BacktrackIters', self.backtrack_iters, epoch+1)
         writer.add_scalar('Pi/KL', 0, epoch+1)
         self.backtrack_fail_ctr += 1
@@ -216,7 +217,7 @@ class TRPOTrainer:
                                                      device=device))
         policy_loss = (ratio * torch.as_tensor(buf.adv.reshape(-1), dtype=torch.float32, 
                                                device=device)).mean()
-        policy_grad = autograd.grad(policy_loss, actor.net.parameters(), create_graph=True, retain_graph=True)
+        policy_grad = autograd.grad(policy_loss, actor.parameters(), create_graph=True, retain_graph=True)
         policy_grad = torch.cat([g.flatten() for g in policy_grad]).detach().cpu().numpy()
 
         return policy_grad
@@ -325,7 +326,7 @@ class TRPOTrainer:
                     for env_id in range(env.num_envs):
                         if autoreset[env_id]:
                             val_terminal = 0 if terminated[env_id] else ac_mod.critic(
-                                torch.as_tensor(obs[env_id], dtype=torch.float32, device=device)).cpu().numpy()
+                                torch.as_tensor(obs[env_id][None], dtype=torch.float32, device=device)).cpu().numpy()
                             ep_ret = buf_mod.terminate_ep(env_id, ep_len[env_id], val_terminal)
                             ep_lens.append(ep_len[env_id])
                             ep_rets.append(ep_ret)
@@ -411,6 +412,16 @@ if __name__ == '__main__':
     # Set directory for logging
     log_dir = os.getcwd() + '/../../runs/' + args.env + '/'
     log_dir += args.exp_name + '/' + args.exp_name + f'_s{args.seed}'
+
+    # Remove existing logs if run already exists
+    if os.path.exists(log_dir) and os.path.isdir(log_dir):
+        print('Warning: run already exists. Deleting previous logs... \n')
+        files = glob.glob(os.path.join(log_dir, 'events.*'))
+        for f in files:
+            try:
+                os.remove(f)
+            except Exception as e:
+                print(f'Failed to delete {f}. Reason {e}')
 
     # Determine type of policy and setup its arguments and environment
     max_ep_len = args.max_ep_len if args.max_ep_len > 0 else None

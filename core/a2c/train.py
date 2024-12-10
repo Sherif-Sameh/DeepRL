@@ -1,4 +1,5 @@
 import os
+import glob
 import inspect
 import gymnasium as gym
 from gymnasium.vector import AsyncVectorEnv
@@ -218,7 +219,7 @@ class A2CTrainer:
                     for env_id in range(env.num_envs):
                         if autoreset[env_id]:
                             val_terminal = 0 if terminated[env_id] else ac_mod.critic(
-                                torch.as_tensor(obs[env_id], dtype=torch.float32, device=device)).cpu().numpy()
+                                torch.as_tensor(obs[env_id][None], dtype=torch.float32, device=device)).cpu().numpy()
                             ep_ret = buf.terminate_ep(env_id, ep_len[env_id], val_terminal)
                             ep_lens.append(ep_len[env_id])
                             ep_rets.append(ep_ret)
@@ -294,9 +295,21 @@ if __name__ == '__main__':
     parser.add_argument('--exp_name', type=str, default='A2C')
     args = parser.parse_args()
 
+    # Set directory for logging
     log_dir = os.getcwd() + '/../../runs/' + args.env + '/'
     log_dir += args.exp_name + '/' + args.exp_name + f'_s{args.seed}'
 
+    # Remove existing logs if run already exists
+    if os.path.exists(log_dir) and os.path.isdir(log_dir):
+        print('Warning: run already exists. Deleting previous logs... \n')
+        files = glob.glob(os.path.join(log_dir, 'events.*'))
+        for f in files:
+            try:
+                os.remove(f)
+            except Exception as e:
+                print(f'Failed to delete {f}. Reason {e}')
+
+    # Determine type of policy and setup its arguments and environment
     max_ep_len = args.max_ep_len if args.max_ep_len > 0 else None
     if args.policy == 'mlp':
         ac = MLPActorCritic
@@ -318,6 +331,7 @@ if __name__ == '__main__':
     else:
         raise NotImplementedError
 
+    # Begin training
     trainer = A2CTrainer()
     trainer.train_mod(env_fn, use_gpu=args.use_gpu, model_path=args.model_path, 
                       ac=ac, ac_kwargs=ac_kwargs, seed=args.seed, 

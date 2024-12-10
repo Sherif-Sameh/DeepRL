@@ -244,12 +244,12 @@ class MLPCritic(MLP):
 
     def forward(self, obs):
         with torch.no_grad():
-            v = torch.squeeze(self.net(obs), -1)
+            v = torch.squeeze(self.net(obs))
         
         return v
     
     def forward_grad(self, obs):
-        return torch.squeeze(self.net(obs), -1)
+        return torch.squeeze(self.net(obs))
 
 class MLPActorCritic(nn.Module):
     def __init__(self, env: VectorEnv, hidden_sizes_actor, hidden_sizes_critic,
