@@ -3,6 +3,7 @@ import inspect
 import gymnasium as gym
 from gymnasium.vector import AsyncVectorEnv
 from gymnasium.spaces import Discrete, Box
+from gymnasium.wrappers import FrameStackObservation, GrayscaleObservation
 import time
 import numpy as np
 import torch
@@ -13,7 +14,26 @@ from torch.optim import Adam
 from torch.optim.lr_scheduler import LinearLR
 from torch.utils.tensorboard import SummaryWriter
 
-from models import MLPActorCritic, MLPActor, MLPCritic
+from models.mlp import MLPActorCritic
+from models.cnn import CNNActorCritic
+
+class SkipAndScaleObservation(gym.Wrapper):
+    def __init__(self, env, skip=4):
+        super().__init__(env)
+        obs_shape = self.observation_space.shape[:2]
+        self.observation_space = gym.spaces.Box(
+                low=0.0, high=1.0, shape=obs_shape, dtype=np.float32)
+        self.skip = skip
+
+    def step(self, action):
+        total_reward = 0.0
+        for i in range(self.skip):
+            obs, rew, terminated, truncated, info = self.env.step(action)
+            total_reward += rew
+            if terminated or truncated:
+                break
+
+        return obs.astype(np.float32)/255.0, total_reward, terminated, truncated, info
 
 np_eps = 1e-8 # np.finfo(np.float32).eps
 
@@ -102,7 +122,7 @@ class ConjugateGradient:
         self.cg_iters = cg_iters
         self.kl_grad_flat = None        
 
-    def conj_grad(self, policy_grad: np.ndarray, actor: MLPActor, device):
+    def conj_grad(self, policy_grad: np.ndarray, actor, device):
         # Calculate the gradient of KL-Divergence
         kl = actor.kl_divergence_grad()
         kl_grad = autograd.grad(outputs=kl, inputs=actor.net.parameters(), create_graph=True, retain_graph=True)
@@ -132,7 +152,7 @@ class ConjugateGradient:
         return x, Hx 
 
     def mat_vec_prod(self, kl_grad: torch.Tensor, v: torch.Tensor,
-                      actor: MLPActor, retain_graph=False):
+                      actor, retain_graph=False):
         out = torch.dot(kl_grad, v)
         grad = autograd.grad(outputs=out, inputs=actor.net.parameters(), 
                              retain_graph=retain_graph)
@@ -149,7 +169,7 @@ class PolicyOptimizer:
         self.backtrack_coeff = backtrack_coeff
         self.backtrack_fail_ctr = 0
 
-    def update_policy(self, epoch, x: np.ndarray, Hx: np.ndarray, actor: MLPActor, 
+    def update_policy(self, epoch, x: np.ndarray, Hx: np.ndarray, actor, 
                       buf: TRPOBuffer, writer: SummaryWriter, device):
         # Store parameters of current policy and policy itself for kl divergence
         if isinstance(actor.pi, torch.distributions.Categorical):
@@ -187,7 +207,7 @@ class PolicyOptimizer:
             
 
 class TRPOTrainer:
-    def __calc_policy_grad(self, actor: MLPActor, buf: TRPOBuffer, device):
+    def __calc_policy_grad(self, actor, buf: TRPOBuffer, device):
         log_prob = actor.log_prob_grad(torch.as_tensor(buf.obs.reshape((-1,)+buf.obs_shape), 
                                                        dtype=torch.float32, device=device),
                                        torch.as_tensor(buf.act.reshape((-1,)+buf.act_shape), 
@@ -201,7 +221,7 @@ class TRPOTrainer:
 
         return policy_grad
     
-    def __calc_val_loss(self, critic: MLPCritic, buf: TRPOBuffer, device):
+    def __calc_val_loss(self, critic, buf: TRPOBuffer, device):
         val = critic.forward_grad(torch.as_tensor(buf.obs.reshape((-1,)+buf.obs_shape), 
                                                   dtype=torch.float32, device=device))
 
@@ -250,6 +270,7 @@ class TRPOTrainer:
             ac_mod = torch.load(model_path)
         else:
             ac_mod = ac(env, **ac_kwargs)
+        ac_mod.layer_summary()
         writer.add_graph(ac_mod, torch.randn(size=env.observation_space.shape))
 
         local_steps_per_epoch = steps_per_epoch // env.num_envs
@@ -348,12 +369,24 @@ class TRPOTrainer:
 if __name__ == '__main__':
     import argparse
     parser = argparse.ArgumentParser()
+    # Model and environment configuration
+    parser.add_argument('--policy', type=str, default='mlp')
     parser.add_argument('--env', type=str, default='HalfCheetah-v2')
     parser.add_argument('--use_gpu', type=bool, default=False)
     parser.add_argument('--model_path', type=str, default='')
-    parser.add_argument('--hid_act', type=int, default=64)
-    parser.add_argument('--hid_cri', type=int, default=64)
-    parser.add_argument('--l', type=int, default=2)
+
+    # MLP model arguments
+    parser.add_argument('--hid_act', nargs='+', type=int, default=[64, 64])
+    parser.add_argument('--hid_cri', nargs='+', type=int, default=[64, 64])
+
+    # CNN model arguments
+    parser.add_argument('--in_channels', type=int, default=4)
+    parser.add_argument('--out_channels', nargs='+', type=int, default=[32, 64, 64])
+    parser.add_argument('--kernel_sizes', nargs='+', type=int, default=[8, 4, 3])
+    parser.add_argument('--strides', nargs='+', type=int, default=[4, 2, 1])
+    parser.add_argument('--features_out', nargs='+', type=int, default=[512])
+
+    # Rest of training arguments
     parser.add_argument('--seed', '-s', type=int, default=0)
     parser.add_argument('--steps', type=int, default=4000)
     parser.add_argument('--epochs', type=int, default=100)
@@ -379,19 +412,31 @@ if __name__ == '__main__':
     log_dir = os.getcwd() + '/../../runs/' + args.env + '/'
     log_dir += args.exp_name + '/' + args.exp_name + f'_s{args.seed}'
 
-    # Actor-Critic kwargs
-    ac_kwargs = dict(hidden_sizes_actor=[args.hid_act]*args.l,
-                     hidden_sizes_critic=[args.hid_cri]*args.l,
-                     hidden_acts_actor=torch.nn.Tanh,
-                     hidden_acts_critic=torch.nn.Tanh)
-    
-    # Setup lambda for initializing asynchronous vectorized environments
+    # Determine type of policy and setup its arguments and environment
     max_ep_len = args.max_ep_len if args.max_ep_len > 0 else None
-    env_fn = [lambda: gym.make(args.env, max_episode_steps=max_ep_len)] * args.cpu
+    if args.policy == 'mlp':
+        ac = MLPActorCritic
+        ac_kwargs = dict(hidden_sizes_actor=args.hid_act, 
+                         hidden_sizes_critic=args.hid_cri,
+                         hidden_acts_actor=torch.nn.Tanh, 
+                         hidden_acts_critic=torch.nn.Tanh)
+        env_fn = [lambda: gym.make(args.env, max_episode_steps=max_ep_len)] * args.cpu
+    elif args.policy == 'cnn':
+        ac = CNNActorCritic
+        ac_kwargs = dict(in_channels=args.in_channels, 
+                         out_channels=args.out_channels,
+                         kernel_sizes=args.kernel_sizes, 
+                         strides=args.strides, 
+                         features_out=args.features_out)
+        env_fn_def = lambda: gym.make(args.env, max_episode_steps=max_ep_len)
+        env_fn = [lambda: FrameStackObservation(SkipAndScaleObservation(GrayscaleObservation(env_fn_def())), 
+                                                stack_size=args.in_channels)] * args.cpu
+    else:
+        raise NotImplementedError
 
     # Begin training
     trainer = TRPOTrainer()
-    trainer.train_mod(env_fn, use_gpu=args.use_gpu, model_path=args.model_path, ac=MLPActorCritic, 
+    trainer.train_mod(env_fn, use_gpu=args.use_gpu, model_path=args.model_path, ac=ac, 
                       ac_kwargs=ac_kwargs, seed=args.seed, steps_per_epoch=args.steps, 
                       epochs=args.epochs, gamma=args.gamma, delta=args.delta, 
                       surr_obj_min=args.surr_obj_min, lr=args.lr, lr_f=args.lr_f,

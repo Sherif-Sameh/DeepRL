@@ -1,4 +1,3 @@
-import numpy as np
 from gymnasium.vector import VectorEnv
 from gymnasium.spaces import Box
 from copy import deepcopy
@@ -48,10 +47,9 @@ class MLP(nn.Module):
         print('\n')
 
     def forward(self, obs):
-        raise NotImplementedError
+        return self.net(obs)
 
-
-class MLPDQN(MLP):
+class MLPCritic(MLP):
     def __init__(self, obs_dim, act_dim, hidden_sizes, hidden_acts):
         # Initialize MLP hidden layers (except final hidden layer)
         super().__init__('critic', obs_dim, hidden_sizes[:-1], hidden_acts)
@@ -86,6 +84,9 @@ class MLPDQN(MLP):
             q = self.net_target[-3:](q)
 
         return q
+    
+    def update_target(self, polyak):
+        polyak_average(self.net.parameters(), self.net_target.parameters(), polyak)
     
     def set_grad_tracking(self, val: bool):
         for param in self.net.parameters():
@@ -130,14 +131,18 @@ class MLPActor(MLP):
             a = self.net_target(obs) * self.action_max
 
         return a
+    
+    def update_target(self, polyak):
+        polyak_average(self.net.parameters(), self.net_target.parameters(), polyak)
 
 
 class MLPActorCritic(nn.Module):
-    def __init__(self, env: VectorEnv, device, hidden_sizes_actor, hidden_sizes_critic,
+    def __init__(self, env: VectorEnv, hidden_sizes_actor, hidden_sizes_critic,
                  hidden_acts_actor, hidden_acts_critic, action_std):
         super().__init__()
         self.action_std = action_std
-        self.action_max = torch.tensor(env.single_action_space.high, device=device) 
+        self.action_max = nn.Parameter(torch.tensor(env.single_action_space.high), 
+                                       requires_grad=False)
 
         # Check the action space type and initialize the actor
         if isinstance(env.single_action_space, Box):
@@ -149,7 +154,7 @@ class MLPActorCritic(nn.Module):
             raise NotImplementedError
         
         # Initialize the critic (DQN)
-        self.critic = MLPDQN(obs_dim, act_dim, hidden_sizes_critic,
+        self.critic = MLPCritic(obs_dim, act_dim, hidden_sizes_critic,
                              hidden_acts_critic)
         
     def step(self, obs):

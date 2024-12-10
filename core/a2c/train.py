@@ -3,6 +3,7 @@ import inspect
 import gymnasium as gym
 from gymnasium.vector import AsyncVectorEnv
 from gymnasium.spaces import Box, Discrete
+from gymnasium.wrappers import FrameStackObservation, GrayscaleObservation
 import time
 import numpy as np
 import torch
@@ -10,7 +11,26 @@ from torch.optim import Adam
 from torch.optim.lr_scheduler import LinearLR
 from torch.utils.tensorboard import SummaryWriter
 
-from models import MLPActorCritic
+from models.mlp import MLPActorCritic
+from models.cnn import CNNActorCritic
+
+class SkipAndScaleObservation(gym.Wrapper):
+    def __init__(self, env, skip=4):
+        super().__init__(env)
+        obs_shape = self.observation_space.shape[:2]
+        self.observation_space = gym.spaces.Box(
+                low=0.0, high=1.0, shape=obs_shape, dtype=np.float32)
+        self.skip = skip
+
+    def step(self, action):
+        total_reward = 0.0
+        for i in range(self.skip):
+            obs, rew, terminated, truncated, info = self.env.step(action)
+            total_reward += rew
+            if terminated or truncated:
+                break
+
+        return obs.astype(np.float32)/255.0, total_reward, terminated, truncated, info
 
 def serialize_locals(locals_dict: dict):
     # Unpack dictionaries within locals_dict
@@ -40,10 +60,11 @@ class A2CBuffer:
             raise NotImplementedError
         
         self.gamma, self.lam = gamma, lam
-        self.buf_size = buf_size
         self.ep_start = np.zeros(env.num_envs, dtype=np.int64)
         obs_shape = env.single_observation_space.shape
         act_shape = env.single_action_space.shape
+        self.obs_flat_shape = (buf_size,) + obs_shape
+        self.act_flat_shape = (buf_size,) + act_shape
         env_buf_size = buf_size // env.num_envs
 
         self.obs = np.zeros((env.num_envs, env_buf_size) + obs_shape, dtype=np.float32)
@@ -90,9 +111,9 @@ class A2CBuffer:
 
 class A2CTrainer:
     def __calc_pi_loss(self, ac_mod: MLPActorCritic, buf: A2CBuffer, device):
-        logp = ac_mod.actor.log_prob_grad(torch.as_tensor(buf.obs.reshape(buf.buf_size, -1), 
+        logp = ac_mod.actor.log_prob_grad(torch.as_tensor(buf.obs.reshape(buf.obs_flat_shape), 
                                                           dtype=torch.float32, device=device),
-                                          torch.as_tensor(buf.act.reshape(buf.buf_size, -1), 
+                                          torch.as_tensor(buf.act.reshape(buf.act_flat_shape), 
                                                           dtype=torch.float32, device=device))
         loss_pi = -(logp * torch.as_tensor(buf.adv.reshape(-1), dtype=torch.float32, device=device)).mean()
 
@@ -102,7 +123,7 @@ class A2CTrainer:
         return loss_pi, ent_pi
 
     def __calc_val_loss(self, ac_mod: MLPActorCritic, buf: A2CBuffer, device):
-        val = ac_mod.critic.forward_grad(torch.as_tensor(buf.obs.reshape(buf.buf_size, -1), 
+        val = ac_mod.critic.forward_grad(torch.as_tensor(buf.obs.reshape(buf.obs_flat_shape), 
                                                          dtype=torch.float32, device=device)) 
         
         return ((val - torch.as_tensor(buf.rtg.reshape(-1), dtype=torch.float32, device=device))**2).mean()
@@ -124,7 +145,7 @@ class A2CTrainer:
             ac_optim.step()
 
         # Log epoch statistics
-        logp = ac_mod.actor.log_prob_no_grad(torch.as_tensor(buf.act.reshape(buf.buf_size, -1), device=device))
+        logp = ac_mod.actor.log_prob_no_grad(torch.as_tensor(buf.act.reshape(buf.act_flat_shape), device=device))
         approx_kl = np.mean(buf.logp.reshape(-1) - logp.cpu().numpy()).item()
         writer.add_scalar('Loss/LossPi', loss_pi_old.item(), epoch+1)
         writer.add_scalar('Loss/LossV', loss_val_old.item(), epoch+1)
@@ -145,13 +166,13 @@ class A2CTrainer:
         save_dir = os.path.join(writer.get_logdir(), 'pyt_save')
         os.makedirs(save_dir, exist_ok=True)
             
-        
         env = AsyncVectorEnv(env_fn)
         if len(model_path) > 0:
             ac_mod = torch.load(model_path)
         else:
             ac_mod = ac(env, **ac_kwargs)
-        writer.add_graph(ac_mod, torch.randn(size=env.observation_space.shape))
+        ac_mod.layer_summary()
+        writer.add_graph(ac_mod, torch.randn(size=env.observation_space.shape, dtype=torch.float32))
 
         np.random.seed(seed)
         torch.manual_seed(seed)
@@ -241,12 +262,24 @@ class A2CTrainer:
 if __name__ == '__main__':
     import argparse
     parser = argparse.ArgumentParser()
+    # Model and environment configuration
+    parser.add_argument('--policy', type=str, default='mlp')
     parser.add_argument('--env', type=str, default='HalfCheetah-v2')
     parser.add_argument('--use_gpu', type=bool, default=False)
     parser.add_argument('--model_path', type=str, default='')
-    parser.add_argument('--hid_act', type=int, default=64)
-    parser.add_argument('--hid_cri', type=int, default=64)
-    parser.add_argument('--l', type=int, default=2)
+
+    # MLP model arguments
+    parser.add_argument('--hid_act', nargs='+', type=int, default=[64, 64])
+    parser.add_argument('--hid_cri', nargs='+', type=int, default=[64, 64])
+    
+    # CNN model arguments
+    parser.add_argument('--in_channels', type=int, default=4)
+    parser.add_argument('--out_channels', nargs='+', type=int, default=[32, 64, 64])
+    parser.add_argument('--kernel_sizes', nargs='+', type=int, default=[8, 4, 3])
+    parser.add_argument('--strides', nargs='+', type=int, default=[4, 2, 1])
+    parser.add_argument('--features_out', nargs='+', type=int, default=[512])
+
+    # Rest of training arguments
     parser.add_argument('--gamma', type=float, default=0.99)
     parser.add_argument('--lam', type=float, default=0.97)
     parser.add_argument('--seed', '-s', type=int, default=0)
@@ -264,17 +297,30 @@ if __name__ == '__main__':
     log_dir = os.getcwd() + '/../../runs/' + args.env + '/'
     log_dir += args.exp_name + '/' + args.exp_name + f'_s{args.seed}'
 
-    ac_kwargs = dict(hidden_sizes_actor=[args.hid_act]*args.l, 
-                    hidden_sizes_critic=[args.hid_cri]*args.l,
-                    hidden_acts_actor=torch.nn.Tanh, 
-                    hidden_acts_critic=torch.nn.Tanh)
-    
     max_ep_len = args.max_ep_len if args.max_ep_len > 0 else None
-    env_fn = [lambda: gym.make(args.env, max_episode_steps=max_ep_len)] * args.cpu
+    if args.policy == 'mlp':
+        ac = MLPActorCritic
+        ac_kwargs = dict(hidden_sizes_actor=args.hid_act, 
+                         hidden_sizes_critic=args.hid_cri,
+                         hidden_acts_actor=torch.nn.Tanh, 
+                         hidden_acts_critic=torch.nn.Tanh)
+        env_fn = [lambda: gym.make(args.env, max_episode_steps=max_ep_len)] * args.cpu
+    elif args.policy == 'cnn':
+        ac = CNNActorCritic
+        ac_kwargs = dict(in_channels=args.in_channels, 
+                         out_channels=args.out_channels,
+                         kernel_sizes=args.kernel_sizes, 
+                         strides=args.strides, 
+                         features_out=args.features_out)
+        env_fn_def = lambda: gym.make(args.env, max_episode_steps=max_ep_len)
+        env_fn = [lambda: FrameStackObservation(SkipAndScaleObservation(GrayscaleObservation(env_fn_def())), 
+                                                stack_size=args.in_channels)] * args.cpu
+    else:
+        raise NotImplementedError
 
     trainer = A2CTrainer()
     trainer.train_mod(env_fn, use_gpu=args.use_gpu, model_path=args.model_path, 
-                      ac=MLPActorCritic, ac_kwargs=ac_kwargs, seed=args.seed, 
+                      ac=ac, ac_kwargs=ac_kwargs, seed=args.seed, 
                       buf_size=args.steps, epochs=args.epochs, gamma=args.gamma, 
                       lam=args.lam, lr=args.lr, lr_f=args.lr_f, log_dir=log_dir, 
                       save_freq=args.save_freq, checkpoint_freq=args.checkpoint_freq)

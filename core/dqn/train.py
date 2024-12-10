@@ -3,6 +3,7 @@ import inspect
 import gymnasium as gym
 from gymnasium.vector import AsyncVectorEnv
 from gymnasium.spaces import Discrete
+from gymnasium.wrappers import FrameStackObservation, GrayscaleObservation
 import time
 import numpy as np
 import torch
@@ -10,7 +11,27 @@ from torch.optim import Adam
 from torch.optim.lr_scheduler import LinearLR
 from torch.utils.tensorboard import SummaryWriter
 
-from models import MLPDQN, MLPDuelingDQN, MLPDDQN, MLPDuelingDDQN
+from models.mlp import MLPDQN, MLPDuelingDQN, MLPDDQN, MLPDuelingDDQN
+from models.cnn import CNNDQN, CNNDuelingDQN, CNNDDQN, CNNDuelingDDQN
+
+class SkipAndScaleObservation(gym.Wrapper):
+    def __init__(self, env, skip=4):
+        super().__init__(env)
+        obs_shape = self.observation_space.shape[:2]
+        self.observation_space = gym.spaces.Box(
+                low=0.0, high=1.0, shape=obs_shape, dtype=np.float32)
+        self.skip = skip
+
+    def step(self, action):
+        total_reward = 0.0
+        for i in range(self.skip):
+            obs, rew, terminated, truncated, info = self.env.step(action)
+            total_reward += rew
+            if terminated or truncated:
+                break
+
+        return obs.astype(np.float32)/255.0, total_reward, terminated, truncated, info
+
 
 def serialize_locals(locals_dict: dict):
     # Unpack dictionaries within locals_dict
@@ -227,7 +248,7 @@ class DQNTrainer:
         # Log epoch statistics
         writer.add_scalar('Loss/LossQ', loss_q.item(), epoch+1)
     
-    def train_mod(self, env_fn, use_gpu=False, model_path='', dueling=False, 
+    def train_mod(self, policy, env_fn, use_gpu=False, model_path='', dueling=False, 
                   double_q=False, q_net_kwargs=dict(), seed=0, prioritized_replay=False, 
                   prioritized_replay_alpha=0.6, prioritized_replay_beta0=0.4, 
                   prioritized_replay_beta_rate=0.0, prioritized_replay_eps=1e-6, 
@@ -249,20 +270,22 @@ class DQNTrainer:
 
         # Determine DQN variant to use
         if (dueling==True) and (double_q==True):
-            q_net = MLPDuelingDDQN
+            q_net = MLPDuelingDDQN if policy == 'mlp' else CNNDuelingDDQN
         elif dueling==True:
-            q_net = MLPDuelingDQN
+            q_net = MLPDuelingDQN if policy == 'mlp' else CNNDuelingDQN
         elif double_q==True:
-            q_net = MLPDDQN
+            q_net = MLPDDQN if policy == 'mlp' else CNNDDQN
         else:
-            q_net = MLPDQN 
-        
+            q_net = MLPDQN if policy == 'mlp' else CNNDQN
+
         # Initialize environment and Q network
         env = AsyncVectorEnv(env_fn)
         if len(model_path) > 0:
             q_net_mod = torch.load(model_path)
         else:
             q_net_mod = q_net(env, eps_init, eps_final, eps_decay_rate, **q_net_kwargs)
+        q_net_mod.layer_summary()
+        writer.add_graph(q_net_mod, torch.randn(size=env.observation_space.shape))
 
         local_steps_per_epoch = steps_per_epoch // env.num_envs
 
@@ -369,18 +392,32 @@ class DQNTrainer:
 if __name__ == '__main__':
     import argparse
     parser = argparse.ArgumentParser()
+    # Model and environment configuration
+    parser.add_argument('--policy', type=str, default='mlp')
     parser.add_argument('--env', type=str, default='HalfCheetah-v2')
     parser.add_argument('--use_gpu', type=bool, default=False)
     parser.add_argument('--model_path', type=str, default='')
-    parser.add_argument('--hid', type=int, default=64)
-    parser.add_argument('--l', type=int, default=2)
+
+    # Model generic arguments
     parser.add_argument('--dueling', type=bool, default=False)
     parser.add_argument('--double_q', type=bool, default=False)
-    parser.add_argument('--seed', '-s', type=int, default=0)
     parser.add_argument('--prioritized_replay', type=bool, default=False)
     parser.add_argument('--eps_init', type=float, default=1.0)
     parser.add_argument('--eps_final', type=float, default=0.05)
     parser.add_argument('--eps_decay_rate', type=float, default=0.2)
+
+    # MLP model arguments
+    parser.add_argument('--hid', nargs='+', type=int, default=[64, 64])
+    
+    # CNN model arguments
+    parser.add_argument('--in_channels', type=int, default=4)
+    parser.add_argument('--out_channels', nargs='+', type=int, default=[32, 64, 64])
+    parser.add_argument('--kernel_sizes', nargs='+', type=int, default=[8, 4, 3])
+    parser.add_argument('--strides', nargs='+', type=int, default=[4, 2, 1])
+    parser.add_argument('--features_out', nargs='+', type=int, default=[512])
+    
+    # Rest of training arguments
+    parser.add_argument('--seed', '-s', type=int, default=0)
     parser.add_argument('--buf_size', type=int, default=1000000)
     parser.add_argument('--steps', type=int, default=4000)
     parser.add_argument('--batch_size', type=int, default=400)
@@ -403,17 +440,27 @@ if __name__ == '__main__':
     log_dir = os.getcwd() + '/../../runs/' + args.env + '/'
     log_dir += args.exp_name + '/' + args.exp_name + f'_s{args.seed}'
 
-    # Q network kwargs
-    q_net_kwargs = dict(hidden_sizes=[args.hid]*args.l,
-                        hidden_acts=torch.nn.ReLU)
-    
-    # Setup lambda for initializing asynchronous vectorized environments
+    # Determine type of policy and setup its arguments and environment
     max_ep_len = args.max_ep_len if args.max_ep_len > 0 else None
-    env_fn = [lambda: gym.make(args.env, max_episode_steps=max_ep_len)] * args.cpu
-
+    if args.policy == 'mlp':
+        q_net_kwargs = dict(hidden_sizes=args.hid,
+                            hidden_acts=torch.nn.ReLU)
+        env_fn = [lambda: gym.make(args.env, max_episode_steps=max_ep_len)] * args.cpu
+    elif args.policy == 'cnn':
+        q_net_kwargs = dict(in_channels=args.in_channels, 
+                         out_channels=args.out_channels,
+                         kernel_sizes=args.kernel_sizes, 
+                         strides=args.strides, 
+                         features_out=args.features_out)
+        env_fn_def = lambda: gym.make(args.env, max_episode_steps=max_ep_len)
+        env_fn = [lambda: FrameStackObservation(SkipAndScaleObservation(GrayscaleObservation(env_fn_def())), 
+                                                stack_size=args.in_channels)] * args.cpu
+    else:
+        raise NotImplementedError
+    
     # Begin training
     trainer = DQNTrainer()
-    trainer.train_mod(env_fn, use_gpu=args.use_gpu, model_path=args.model_path, 
+    trainer.train_mod(args.policy, env_fn, use_gpu=args.use_gpu, model_path=args.model_path, 
                       dueling=args.dueling, double_q=args.double_q, 
                       q_net_kwargs=q_net_kwargs, seed=args.seed, 
                       prioritized_replay=args.prioritized_replay, 

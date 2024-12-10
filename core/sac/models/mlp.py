@@ -1,4 +1,3 @@
-import numpy as np
 from gymnasium.vector import VectorEnv
 from gymnasium.spaces import Box
 from copy import deepcopy
@@ -48,8 +47,11 @@ class MLP(nn.Module):
             print(layer.__class__.__name__, 'input & output shapes:\t', input_shape, x.shape)
         print('\n')
 
+    def forward(self, obs):
+        return self.net(obs)
 
-class MLPDQN(MLP):
+
+class MLPCritic(MLP):
     def __init__(self, obs_dim, act_dim, hidden_sizes, hidden_acts):
         # Initialize MLP hidden layers
         super().__init__('critic', obs_dim + act_dim, hidden_sizes, hidden_acts)
@@ -74,6 +76,9 @@ class MLPDQN(MLP):
 
         return q
     
+    def update_target(self, polyak):
+        polyak_average(self.net.parameters(), self.net_target.parameters(), polyak)
+
     def set_grad_tracking(self, val: bool):
         for param in self.net.parameters():
             param.requires_grad = val
@@ -119,10 +124,11 @@ class MLPActor(MLP):
     
 
 class MLPActorCritic(nn.Module):
-    def __init__(self, env: VectorEnv, device, hidden_sizes_actor, hidden_sizes_critic,
+    def __init__(self, env: VectorEnv, hidden_sizes_actor, hidden_sizes_critic,
                  hidden_acts_actor, hidden_acts_critic):
         super().__init__()
-        self.action_max = torch.tensor(env.single_action_space.high, device=device) 
+        self.action_max = nn.Parameter(torch.tensor(env.single_action_space.high), 
+                                       requires_grad=False)
 
         # Check the action space type and initialize the actor
         if isinstance(env.single_action_space, Box):
@@ -134,9 +140,9 @@ class MLPActorCritic(nn.Module):
             raise NotImplementedError
         
         # Initialize the two critics (DQNs)
-        self.critic_1 = MLPDQN(obs_dim, act_dim, hidden_sizes_critic,
+        self.critic_1 = MLPCritic(obs_dim, act_dim, hidden_sizes_critic,
                                hidden_acts_critic)
-        self.critic_2 = MLPDQN(obs_dim, act_dim, hidden_sizes_critic,
+        self.critic_2 = MLPCritic(obs_dim, act_dim, hidden_sizes_critic,
                                hidden_acts_critic)
         
     def step(self, obs):
@@ -157,10 +163,11 @@ class MLPActorCritic(nn.Module):
     
     # Only for tracing the actor and critic's networks for tensorboard
     def forward(self, obs):
-        act = self.actor.net(obs)[..., :self.actor.act_dim]
+        out = self.actor.net(obs)
+        act = out[..., :self.actor.act_dim]
         q_val = self.critic_1.net(torch.cat([obs, act], dim=-1))
 
-        return act, q_val
+        return out, q_val
     
     def layer_summary(self):
         print('Actor Summary: \n')

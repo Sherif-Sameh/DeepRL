@@ -41,9 +41,8 @@ class MLP(nn.Module):
             print(layer.__class__.__name__, 'input & output shapes:\t', input_shape, x.shape)
         print('\n')
 
-    def forward(self):
-        raise NotImplementedError
-    
+    def forward(self, obs):
+        self.net(obs)
     
 class MLPDQN(MLP):
     def __init__(self, env: VectorEnv, eps_init, eps_final, 
@@ -107,9 +106,7 @@ class MLPDQN(MLP):
         return q
     
     def update_target(self):
-        with torch.no_grad():
-            for param, param_target in zip(self.net.parameters(), self.net_target.parameters()):
-                param_target.data.copy_(param.data)
+        self.net_target.load_state_dict(self.net.state_dict())
 
     def update_eps_exp(self):
         self.eps = max(self.eps_min, self.eps * np.exp(-self.eps_decay_rate))        

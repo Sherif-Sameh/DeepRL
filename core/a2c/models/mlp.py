@@ -1,3 +1,4 @@
+import abc
 import numpy as np
 from gymnasium.vector import VectorEnv
 from gymnasium.spaces import Box, Discrete
@@ -41,7 +42,7 @@ class MLP(nn.Module):
         print('\n')
 
     def forward(self, obs):
-        raise NotImplementedError
+        return self.net(obs)
     
     
 class MLPActor(MLP):
@@ -52,14 +53,27 @@ class MLPActor(MLP):
         self.net.add_module('actor_output', nn.Linear(hidden_sizes[-1], act_dim))
         self.net[-1].apply(lambda m: init_weights(m, gain=0.01))
 
+    @abc.abstractmethod
     def forward(self, obs):
-        raise NotImplementedError
+        """Updates the actor's policy using given observations, then samples 
+        and returns actions from the updated polciy. Always evaluates the 
+        network under torch.no_grad(). """
+        pass
     
+    @abc.abstractmethod
     def log_prob_no_grad(self, act):
-        raise NotImplementedError
+        """Evaluates and returns log probabilities of the given actions 
+        with respect to the current stored policy. Always evaluates 
+        probabilites under torch.no_grad(). """
+        pass
     
+    @abc.abstractmethod
     def log_prob_grad(self, obs, act):
-        raise NotImplementedError
+        """Re-evaluates the network and updates the actor's policy using 
+        the given observations. Then, it evaluates the log probabilities
+        of the given actions from the policy with gradient tracking enabled.
+        Returns the computed log probabilites. """
+        pass
     
 class MLPActorDiscrete(MLPActor):
     def __init__(self, obs_dim, act_dim, hidden_sizes, hidden_acts):

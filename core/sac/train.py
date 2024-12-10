@@ -3,6 +3,7 @@ import inspect
 import gymnasium as gym
 from gymnasium.vector import AsyncVectorEnv
 from gymnasium.spaces import Box
+from gymnasium.wrappers import FrameStackObservation, GrayscaleObservation
 import time
 import numpy as np
 import torch
@@ -11,7 +12,26 @@ from torch.optim import Adam
 from torch.optim.lr_scheduler import LinearLR
 from torch.utils.tensorboard import SummaryWriter
 
-from models import MLPActorCritic, polyak_average
+from models.mlp import MLPActorCritic
+from models.cnn import CNNActorCritic
+
+class SkipAndScaleObservation(gym.Wrapper):
+    def __init__(self, env, skip=4):
+        super().__init__(env)
+        obs_shape = self.observation_space.shape[:2]
+        self.observation_space = gym.spaces.Box(
+                low=0.0, high=1.0, shape=obs_shape, dtype=np.float32)
+        self.skip = skip
+
+    def step(self, action):
+        total_reward = 0.0
+        for i in range(self.skip):
+            obs, rew, terminated, truncated, info = self.env.step(action)
+            total_reward += rew
+            if terminated or truncated:
+                break
+
+        return obs.astype(np.float32)/255.0, total_reward, terminated, truncated, info
 
 def serialize_locals(locals_dict: dict):
     # Unpack dictionaries within locals_dict
@@ -194,9 +214,9 @@ class SACTrainer:
             writer.add_scalar('Loss/LossAlpha', loss_alpha.item(), epoch+1)
 
         # Update target critic networks
-        polyak_average(ac.critic_1.net.parameters(), ac.critic_1.net_target.parameters(), polyak)
-        polyak_average(ac.critic_2.net.parameters(), ac.critic_2.net_target.parameters(), polyak)
-
+        ac.critic_1.update_target(polyak)
+        ac.critic_2.update_target(polyak)
+        
         # Log training statistics
         writer.add_scalar('Loss/LossQ1', loss_q1.item(), epoch+1)
         writer.add_scalar('Loss/LossQ2', loss_q2.item(), epoch+1)
@@ -220,6 +240,18 @@ class SACTrainer:
         save_dir = os.path.join(writer.get_logdir(), 'pyt_save')
         os.makedirs(save_dir, exist_ok=True)
         
+        # Initialize environment and Actor-Critic
+        env = AsyncVectorEnv(env_fn)
+        if len(model_path) > 0:
+            ac_mod = torch.load(model_path)
+        else:
+            ac_mod = ac(env, **ac_kwargs)
+        ac_mod.layer_summary()
+        writer.add_graph(ac_mod, torch.randn(size=env.observation_space.shape, dtype=torch.float32))
+
+        local_steps_per_epoch = steps_per_epoch // env.num_envs
+        local_start_steps = start_steps // env.num_envs
+
         # Setup random seed number for PyTorch and NumPy
         torch.manual_seed(seed=seed)
         np.random.seed(seed=seed)
@@ -232,18 +264,7 @@ class SACTrainer:
             torch.backends.cudnn.benchmark = True
         else:
             device = torch.device('cpu')
-
-        # Initialize environment and Actor-Critic
-        env = AsyncVectorEnv(env_fn)
-        if len(model_path) > 0:
-            ac_mod = torch.load(model_path)
-        else:
-            ac_mod = ac(env, device, **ac_kwargs)
         ac_mod.to(device)
-        writer.add_graph(ac_mod, torch.randn(size=env.observation_space.shape, device=device))
-
-        local_steps_per_epoch = steps_per_epoch // env.num_envs
-        local_start_steps = start_steps // env.num_envs
 
         # Initialize the experience replay buffer for training
         buf = ReplayBuffer(env, buf_size, batch_size)
@@ -344,12 +365,24 @@ class SACTrainer:
 if __name__ == '__main__':
     import argparse
     parser = argparse.ArgumentParser()
+    # Model and environment configuration
+    parser.add_argument('--policy', type=str, default='mlp')
     parser.add_argument('--env', type=str, default='HalfCheetah-v2')
     parser.add_argument('--use_gpu', type=bool, default=False)
     parser.add_argument('--model_path', type=str, default='')
-    parser.add_argument('--hid_act', type=int, default=64)
-    parser.add_argument('--hid_cri', type=int, default=64)
-    parser.add_argument('--l', type=int, default=2)
+
+    # Common model arguments 
+    parser.add_argument('--hid_act', nargs='+', type=int, default=[64, 64])
+    parser.add_argument('--hid_cri', nargs='+', type=int, default=[64, 64])
+
+    # CNN model arguments
+    parser.add_argument('--in_channels', type=int, default=4)
+    parser.add_argument('--out_channels', nargs='+', type=int, default=[32, 64, 64])
+    parser.add_argument('--kernel_sizes', nargs='+', type=int, default=[8, 4, 3])
+    parser.add_argument('--strides', nargs='+', type=int, default=[4, 2, 1])
+    parser.add_argument('--features_out', nargs='+', type=int, default=[512])
+
+    # Rest of training arguments
     parser.add_argument('--seed', '-s', type=int, default=0)
     parser.add_argument('--steps', type=int, default=4000)
     parser.add_argument('--epochs', type=int, default=100)
@@ -377,19 +410,33 @@ if __name__ == '__main__':
     log_dir = os.getcwd() + '/../../runs/' + args.env + '/'
     log_dir += args.exp_name + '/' + args.exp_name + f'_s{args.seed}'
 
-    # Actor-Critic network kwargs
-    ac_kwargs = dict(hidden_sizes_actor=[args.hid_act]*args.l,
-                     hidden_sizes_critic=[args.hid_cri]*args.l,
-                     hidden_acts_actor=torch.nn.ReLU, 
-                     hidden_acts_critic=torch.nn.ReLU)
-    
-    # Setup lambda for initializing asynchronous vectorized environments
+    # Determine type of policy and setup its arguments and environment
     max_ep_len = args.max_ep_len if args.max_ep_len > 0 else None
-    env_fn = [lambda: gym.make(args.env, max_episode_steps=max_ep_len)] * args.cpu
+    if args.policy == 'mlp':
+        ac = MLPActorCritic
+        ac_kwargs = dict(hidden_sizes_actor=args.hid_act, 
+                         hidden_sizes_critic=args.hid_cri,
+                         hidden_acts_actor=torch.nn.ReLU, 
+                         hidden_acts_critic=torch.nn.ReLU)
+        env_fn = [lambda: gym.make(args.env, max_episode_steps=max_ep_len)] * args.cpu
+    elif args.policy == 'cnn':
+        ac = CNNActorCritic
+        ac_kwargs = dict(in_channels=args.in_channels, 
+                         out_channels=args.out_channels,
+                         kernel_sizes=args.kernel_sizes, 
+                         strides=args.strides, 
+                         features_out=args.features_out,
+                         hidden_sizes_actor=args.hid_act, 
+                         hidden_sizes_critic=args.hid_cri)
+        env_fn_def = lambda: gym.make(args.env, max_episode_steps=max_ep_len)
+        env_fn = [lambda: FrameStackObservation(SkipAndScaleObservation(GrayscaleObservation(env_fn_def())), 
+                                                stack_size=args.in_channels)] * args.cpu
+    else:
+        raise NotImplementedError
 
     # Begin training
     trainer = SACTrainer()
-    trainer.train_mod(env_fn, use_gpu=args.use_gpu, model_path=args.model_path, ac=MLPActorCritic, 
+    trainer.train_mod(env_fn, use_gpu=args.use_gpu, model_path=args.model_path, ac=ac, 
                       ac_kwargs=ac_kwargs, seed=args.seed, steps_per_epoch=args.steps, 
                       epochs=args.epochs, buf_size=args.buf_size, gamma=args.gamma, 
                       polyak=args.polyak, lr=args.lr, lr_f=args.lr_f, alpha=args.alpha, 

@@ -1,10 +1,10 @@
+import abc
 import numpy as np
 from gymnasium.vector import VectorEnv
 from gymnasium.spaces import Box, Discrete
 
 import torch
 from torch import nn
-import torch.distributions
 from torch.distributions.categorical import Categorical
 from torch.distributions.normal import Normal
 
@@ -44,7 +44,7 @@ class MLP(nn.Module):
         print('\n')
 
     def forward(self, obs):
-        raise NotImplementedError
+        return self.net(obs)
     
     
 class MLPActor(MLP):
@@ -58,26 +58,40 @@ class MLPActor(MLP):
         # Initialize a generic stochastic policy
         self.pi = torch.distributions.Distribution(validate_args=False)
 
+    @abc.abstractmethod
     def forward(self, obs):
-        raise NotImplementedError
+        """Updates the actor's policy using given observations, then samples 
+        and returns actions from the updated polciy. Always evaluates the 
+        network under torch.no_grad(). """
+        pass
     
+    @abc.abstractmethod
     def update_policy(self, obs):
-        raise NotImplementedError
+        """Updates the actor's policy using the given observations. Always,
+        evaluates the network under torch.no_grad(). """
+        pass
     
+    @abc.abstractmethod
     def log_prob_no_grad(self, act):
-        raise NotImplementedError
+        """Evaluates and returns log probabilities of the given actions 
+        with respect to the current stored policy. Always evaluates 
+        probabilites under torch.no_grad(). """
+        pass
     
+    @abc.abstractmethod
     def log_prob_grad(self, obs, act):
-        raise NotImplementedError
+        """Re-evaluates the network and updates the actor's policy using 
+        the given observations. Then, it evaluates the log probabilities
+        of the given actions from the policy with gradient tracking enabled.
+        Returns the computed log probabilites. """
+        pass
     
-    def surrogate_obj(self, obs, act, adv, log_prob_prev):
-        raise NotImplementedError
-
-    def kl_divergence_grad(self):
-        raise NotImplementedError
-    
-    def kl_divergence_no_grad(self, pi_prev):
-        raise NotImplementedError
+    @abc.abstractmethod
+    def kl_divergence(self, obs, pi_prev):
+        """Evaluates and returns the KL-Divergence of the current policy 
+        with respect to the given old policy. All steps are executed under
+        torch.no_grad(). """
+        pass
 
     
 class MLPActorDiscrete(MLPActor):
@@ -112,30 +126,16 @@ class MLPActorDiscrete(MLPActor):
         
         return self.pi.log_prob(act)
     
-    def surrogate_obj(self, obs, act, adv, log_prob_prev):
-        self.update_policy(obs) # update policy after parameter update
-        log_prob = self.log_prob_no_grad(act).cpu().numpy()
-        
-        return np.mean(np.exp(log_prob - log_prob_prev) * adv)
-    
-    def kl_divergence_grad(self):
-        # Note: self.pi should've been already updated by log_prob_grad()
-        with torch.no_grad():
-            logits = self.pi.logits.detach()
-            pi = Categorical(logits=logits)
-        
-        return torch.distributions.kl_divergence(pi, self.pi).mean()
-    
-    def kl_divergence_no_grad(self, pi_prev):
-        with torch.no_grad():
-            kl = torch.distributions.kl.kl_divergence(pi_prev, self.pi)
+    def kl_divergence(self, obs, pi_prev):
+        self.update_policy(obs) # Re-evaluate policy on all observations
+        kl = torch.distributions.kl.kl_divergence(pi_prev, self.pi)
         
         return kl.mean()
             
 class MLPActorContinuous(MLPActor):
     def __init__(self, obs_dim, act_dim, hidden_sizes, hidden_acts):
         super().__init__(obs_dim, act_dim, hidden_sizes, hidden_acts)
-        log_std = -0.5 * torch.ones(act_dim, dtype=torch.float32)
+        log_std = -0.1 * torch.ones(act_dim, dtype=torch.float32)
         self.log_std = nn.Parameter(log_std, requires_grad=True)
 
         # Initialize the policy randomly
@@ -157,7 +157,7 @@ class MLPActorContinuous(MLPActor):
     def log_prob_no_grad(self, act):
         with torch.no_grad():
             log_prob = self.pi.log_prob(act).sum(axis=-1)
-            
+        
         return log_prob
     
     def log_prob_grad(self, obs, act):
@@ -166,30 +166,8 @@ class MLPActorContinuous(MLPActor):
 
         return self.pi.log_prob(act).sum(axis=-1)
     
-    def surrogate_obj(self, obs, act, adv, log_prob_prev):
-        self.update_policy(obs) # update policy after parameter update
-        log_prob = self.log_prob_no_grad(act).cpu().numpy()
-
-        return np.mean(np.exp(log_prob - log_prob_prev) * adv)
-    
-    def kl_divergence_grad(self):
-        # Note: self.pi should've been already updated by log_prob_grad()
-        mu1, log_std1 = self.pi.mean, self.log_std
-        var1 = torch.exp(2 * log_std1)
-        with torch.no_grad():
-            mu0, log_std0 = self.pi.mean.detach(), self.log_std.data
-            var0 = torch.exp(2 * log_std0)
-
-        # Compute the element-wise KL divergence
-        pre_sum = 0.5 * (((mu0 - mu1) ** 2 + var0) / (var1 + 1e-8) - 1) + log_std1 - log_std0
-        
-        # Sum over the dimensions of the distribution
-        all_kls = torch.sum(pre_sum, dim=1)
-        
-        # Return the mean KL divergence over the batch
-        return torch.mean(all_kls)
-    
-    def kl_divergence_no_grad(self, pi_prev):
+    def kl_divergence(self, obs, pi_prev):
+        self.update_policy(obs) # Re-evaluate policy on all observations
         mu1, log_std1 = self.pi.mean.detach(), self.log_std.data
         var1 = torch.exp(2 * log_std1)
         with torch.no_grad():
@@ -241,8 +219,7 @@ class MLPActorCritic(nn.Module):
             raise NotImplementedError
         
         # Initialize the critic
-        self.critic = MLPCritic(obs_dim, hidden_sizes_critic,
-                                hidden_acts_critic)
+        self.critic = MLPCritic(obs_dim, hidden_sizes_critic, hidden_acts_critic)
         
     def step(self, obs):
         act = self.actor(obs)
