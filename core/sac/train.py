@@ -1,10 +1,9 @@
 import os
-import glob
-import inspect
 import gymnasium as gym
 from gymnasium.vector import AsyncVectorEnv
 from gymnasium.spaces import Box
 from gymnasium.wrappers import FrameStackObservation, GrayscaleObservation
+from gymnasium.wrappers.vector import RescaleAction
 import time
 import numpy as np
 import torch
@@ -13,47 +12,10 @@ from torch.optim import Adam
 from torch.optim.lr_scheduler import LinearLR
 from torch.utils.tensorboard import SummaryWriter
 
-from models.mlp import MLPActorCritic
-from models.cnn import CNNActorCritic
-
-class SkipAndScaleObservation(gym.Wrapper):
-    def __init__(self, env, skip=4):
-        super().__init__(env)
-        obs_shape = self.observation_space.shape[:2]
-        self.observation_space = gym.spaces.Box(
-                low=0.0, high=1.0, shape=obs_shape, dtype=np.float32)
-        self.skip = skip
-
-    def step(self, action):
-        total_reward = 0.0
-        for i in range(self.skip):
-            obs, rew, terminated, truncated, info = self.env.step(action)
-            total_reward += rew
-            if terminated or truncated:
-                break
-
-        return obs.astype(np.float32)/255.0, total_reward, terminated, truncated, info
-
-def serialize_locals(locals_dict: dict):
-    # Unpack dictionaries within locals_dict
-    dict_keys = []
-    for k in locals_dict:
-        if isinstance(locals_dict[k], dict):
-            dict_keys.append(k)
-    for k in dict_keys:
-        nested_dict = locals_dict.pop(k)
-        for k_dict in nested_dict:
-            locals_dict[k_dict] = nested_dict[k_dict]
-    
-    # Convert any value that is a class to its name and list to tensor
-    for k in locals_dict:
-        if inspect.isclass(locals_dict[k]):
-            locals_dict[k] = locals_dict[k].__name__
-
-        if isinstance(locals_dict[k], list):
-            locals_dict[k] = torch.tensor(locals_dict[k])
-    
-    return locals_dict
+from core.sac.models.mlp import MLPActorCritic
+from core.sac.models.cnn import CNNActorCritic
+from core.rl_utils import SkipAndScaleObservation, save_env
+from core.utils import serialize_locals, clear_logs
 
 class ReplayBuffer:
     def __init__(self, env: AsyncVectorEnv, buf_size, batch_size):
@@ -223,16 +185,16 @@ class SACTrainer:
         writer.add_scalar('Loss/LossQ2', loss_q2.item(), epoch+1)
         writer.add_scalar('Loss/LossPi', loss_pi.item(), epoch+1)
 
-    def train_mod(self, env_fn, use_gpu=False, model_path='', ac=MLPActorCritic, 
-                  ac_kwargs=dict(), seed=0, steps_per_epoch=4000, epochs=100, 
-                  buf_size=1000000, gamma=0.99, polyak=0.995, lr=3e-4, lr_f=None, 
-                  alpha=0.2, alpha_min=3e-3, entropy_target=None, auto_alpha=True, 
-                  batch_size=400, start_steps=10000, learning_starts=1000, 
-                  update_every=50, num_test_episodes=10, log_dir=None, 
-                  save_freq=10, checkpoint_freq=25):
+    def train_mod(self, env_fn, wrappers_kwargs=dict(), use_gpu=False, model_path='', 
+                  ac=MLPActorCritic, ac_kwargs=dict(), seed=0, steps_per_epoch=4000, 
+                  epochs=100, buf_size=1000000, gamma=0.99, polyak=0.995, lr=3e-4, 
+                  lr_f=None, alpha=0.2, alpha_min=3e-3, entropy_target=None, 
+                  auto_alpha=True, batch_size=400, start_steps=10000, 
+                  learning_starts=1000, update_every=50, num_test_episodes=10, 
+                  log_dir=None, save_freq=10, checkpoint_freq=25):
         # Serialize local hyperparameters
         locals_dict = locals()
-        locals_dict.pop('self'); locals_dict.pop('env_fn')
+        locals_dict.pop('self'); locals_dict.pop('env_fn'); locals_dict.pop('wrappers_kwargs')
         locals_dict = serialize_locals(locals_dict)
 
         # Initialize logger and save hyperparameters
@@ -241,8 +203,18 @@ class SACTrainer:
         save_dir = os.path.join(writer.get_logdir(), 'pyt_save')
         os.makedirs(save_dir, exist_ok=True)
         
-        # Initialize environment and Actor-Critic
+        # Initialize environment and attempt to save a copy of it 
         env = AsyncVectorEnv(env_fn)
+        env = RescaleAction(env, min_action=-1.0, max_action=1.0) \
+            if isinstance(env.single_action_space, Box) else env # Rescale cont. action spaces to [-1, 1]
+        try:
+            save_env(env_fn[0], wrappers_kwargs, log_dir, render_mode='human')
+            save_env(env_fn[0], wrappers_kwargs, log_dir, render_mode='rgb_array')
+        except Exception as e:
+            print(f'Could not save environment: {e} \n\n')
+
+        
+        # Initialize Actor-Critic
         if len(model_path) > 0:
             ac_mod = torch.load(model_path)
         else:
@@ -368,7 +340,7 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     # Model and environment configuration
     parser.add_argument('--policy', type=str, default='mlp')
-    parser.add_argument('--env', type=str, default='HalfCheetah-v2')
+    parser.add_argument('--env', type=str, default='HalfCheetah-v5')
     parser.add_argument('--use_gpu', type=bool, default=False)
     parser.add_argument('--model_path', type=str, default='')
 
@@ -408,18 +380,12 @@ if __name__ == '__main__':
     args = parser.parse_args()
 
     # Set directory for logging
-    log_dir = os.getcwd() + '/../../runs/' + args.env + '/'
+    current_script_dir = os.path.dirname(os.path.abspath(__file__))
+    log_dir = current_script_dir + '/../../runs/' + args.env + '/'
     log_dir += args.exp_name + '/' + args.exp_name + f'_s{args.seed}'
 
     # Remove existing logs if run already exists
-    if os.path.exists(log_dir) and os.path.isdir(log_dir):
-        print('Warning: run already exists. Deleting previous logs... \n')
-        files = glob.glob(os.path.join(log_dir, 'events.*'))
-        for f in files:
-            try:
-                os.remove(f)
-            except Exception as e:
-                print(f'Failed to delete {f}. Reason {e}')
+    clear_logs(log_dir)
 
     # Determine type of policy and setup its arguments and environment
     max_ep_len = args.max_ep_len if args.max_ep_len > 0 else None
@@ -429,7 +395,9 @@ if __name__ == '__main__':
                          hidden_sizes_critic=args.hid_cri,
                          hidden_acts_actor=torch.nn.ReLU, 
                          hidden_acts_critic=torch.nn.ReLU)
-        env_fn = [lambda: gym.make(args.env, max_episode_steps=max_ep_len)] * args.cpu
+        env_fn = [lambda render_mode=None: gym.make(args.env, max_episode_steps=max_ep_len, 
+                                                    render_mode=render_mode)] * args.cpu
+        wrappers_kwargs = dict()
     elif args.policy == 'cnn':
         ac = CNNActorCritic
         ac_kwargs = dict(in_channels=args.in_channels, 
@@ -439,18 +407,23 @@ if __name__ == '__main__':
                          features_out=args.features_out,
                          hidden_sizes_actor=args.hid_act, 
                          hidden_sizes_critic=args.hid_cri)
-        env_fn_def = lambda: gym.make(args.env, max_episode_steps=max_ep_len)
-        env_fn = [lambda: FrameStackObservation(SkipAndScaleObservation(GrayscaleObservation(env_fn_def())), 
-                                                stack_size=args.in_channels)] * args.cpu
+        env_fn_def = lambda render_mode=None: gym.make(args.env, max_episode_steps=max_ep_len, 
+                                                       render_mode=render_mode)
+        env_fn = [lambda render_mode=None: FrameStackObservation(SkipAndScaleObservation(
+            GrayscaleObservation(env_fn_def(render_mode=render_mode))), stack_size=args.in_channels)] * args.cpu
+        wrappers_kwargs = {
+            'FrameStackObservation': {'stack_size': args.in_channels}
+        }
     else:
         raise NotImplementedError
 
     # Begin training
     trainer = SACTrainer()
-    trainer.train_mod(env_fn, use_gpu=args.use_gpu, model_path=args.model_path, ac=ac, 
-                      ac_kwargs=ac_kwargs, seed=args.seed, steps_per_epoch=args.steps, 
-                      epochs=args.epochs, buf_size=args.buf_size, gamma=args.gamma, 
-                      polyak=args.polyak, lr=args.lr, lr_f=args.lr_f, alpha=args.alpha, 
+    trainer.train_mod(env_fn, wrappers_kwargs=wrappers_kwargs, use_gpu=args.use_gpu, 
+                      model_path=args.model_path, ac=ac, ac_kwargs=ac_kwargs, 
+                      seed=args.seed, steps_per_epoch=args.steps, epochs=args.epochs, 
+                      buf_size=args.buf_size, gamma=args.gamma, polyak=args.polyak, 
+                      lr=args.lr, lr_f=args.lr_f, alpha=args.alpha, 
                       alpha_min=args.alpha_min,auto_alpha=args.auto_alpha, 
                       batch_size=args.batch_size, start_steps=args.start_steps, 
                       learning_starts=args.learning_starts, update_every=args.update_every, 

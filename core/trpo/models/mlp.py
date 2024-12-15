@@ -164,7 +164,7 @@ class MLPActorDiscrete(MLPActor):
 class MLPActorContinuous(MLPActor):
     def __init__(self, obs_dim, act_dim, hidden_sizes, hidden_acts):
         super().__init__(obs_dim, act_dim, hidden_sizes, hidden_acts)
-        log_std = -0.5 * torch.ones(act_dim, dtype=torch.float32)
+        log_std = -1.0 * torch.ones(act_dim, dtype=torch.float32)
         self.log_std = nn.Parameter(log_std, requires_grad=True)
 
         # Initialize the policy randomly

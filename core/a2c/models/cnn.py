@@ -131,7 +131,7 @@ class CNNActorDiscrete(CNNActor):
 class CNNActorContinuous(CNNActor):
     def __init__(self, feature_ext: FeatureExtractor, act_dim):
         super().__init__(feature_ext, act_dim)
-        log_std = -0.5 * torch.ones(act_dim, dtype=torch.float32)
+        log_std = -1.0 * torch.ones(act_dim, dtype=torch.float32)
         self.log_std = nn.Parameter(log_std, requires_grad=True)
 
         # Initialize the policy randomly

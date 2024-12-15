@@ -6,16 +6,12 @@ from copy import deepcopy
 import torch
 from torch import nn
 
+from core.rl_utils import polyak_average
+
 def init_weights(module, gain):
     if isinstance(module, nn.Linear):
         nn.init.orthogonal_(module.weight, gain=gain)
         module.bias.data.fill_(0)
-
-def polyak_average(params, target_params, polyak):
-    with torch.no_grad():
-        for param, param_target in zip(params, target_params):
-            param_target.data.mul_(polyak)
-            param_target.data.add_(param.data, alpha=1-polyak)
 
 class MLP(nn.Module):
     def __init__(self, prefix, obs_dim, hidden_sizes, hidden_acts):
