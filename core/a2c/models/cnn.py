@@ -118,7 +118,7 @@ class CNNActorDiscrete(CNNActor):
 
     def log_prob_no_grad(self, act):
         with torch.no_grad():
-            log_prob = self.pi.log_prob(act.squeeze())
+            log_prob = self.pi.log_prob(act)
         
         return log_prob
     
@@ -126,7 +126,7 @@ class CNNActorDiscrete(CNNActor):
         logits = self.actor_head(self.feature_ext(obs))
         self.pi = Categorical(logits=logits)
 
-        return self.pi.log_prob(act.squeeze())
+        return self.pi.log_prob(act)
     
 class CNNActorContinuous(CNNActor):
     def __init__(self, feature_ext: FeatureExtractor, act_dim):

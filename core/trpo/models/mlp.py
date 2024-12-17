@@ -90,8 +90,8 @@ class MLPActor(MLP):
         """Evaluates and returns TRPO's surrogate objective function by
         updating the policy and comparing the log probabilites of the given 
         actions to those previously computed. All steps are executed under
-        torch.no_grad() and returned value is NumPy not torch.Tensor. 
-        Typically called after parameter update to evaluate new policy. """
+        torch.no_grad(). Typically called after parameter update to evaluate 
+        new policy. """
         pass
 
     @abc.abstractmethod
@@ -143,9 +143,10 @@ class MLPActorDiscrete(MLPActor):
     
     def surrogate_obj(self, obs, act, adv, log_prob_prev):
         self.update_policy(obs) # update policy after parameter update
-        log_prob = self.log_prob_no_grad(act).cpu().numpy()
+        log_prob = self.log_prob_no_grad(act)
+        loss_pi = torch.mean(torch.exp(log_prob - log_prob_prev) * adv)
         
-        return np.mean(np.exp(log_prob - log_prob_prev) * adv)
+        return loss_pi
     
     def kl_divergence_grad(self):
         # Note: self.pi should've been already updated by log_prob_grad()
@@ -197,9 +198,10 @@ class MLPActorContinuous(MLPActor):
     
     def surrogate_obj(self, obs, act, adv, log_prob_prev):
         self.update_policy(obs) # update policy after parameter update
-        log_prob = self.log_prob_no_grad(act).cpu().numpy()
-
-        return np.mean(np.exp(log_prob - log_prob_prev) * adv)
+        log_prob = self.log_prob_no_grad(act)
+        loss_pi = torch.mean(torch.exp(log_prob - log_prob_prev) * adv)
+        
+        return loss_pi
     
     def kl_divergence_grad(self):
         # Note: self.pi should've been already updated by log_prob_grad()

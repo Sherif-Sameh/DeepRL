@@ -66,6 +66,10 @@ class MLPCritic(MLP):
 
         return q
     
+    # Used in CNN-AC to track gradients only after feature extraction
+    def forward_actions(self, obs, act):
+        return self.forward(obs, act)
+    
     def forward_target(self, obs, act):
         with torch.no_grad():
             q = self.net_target(torch.cat([obs, act], dim=-1))

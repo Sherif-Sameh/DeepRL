@@ -92,7 +92,7 @@ class MLPActorDiscrete(MLPActor):
 
     def log_prob_no_grad(self, act):
         with torch.no_grad():
-            log_prob = self.pi.log_prob(act.squeeze())
+            log_prob = self.pi.log_prob(act)
         
         return log_prob
     
@@ -100,7 +100,7 @@ class MLPActorDiscrete(MLPActor):
         logits = self.net(obs)
         self.pi = Categorical(logits=logits)
 
-        return self.pi.log_prob(act.squeeze())
+        return self.pi.log_prob(act)
     
 class MLPActorContinuous(MLPActor):
     def __init__(self, obs_dim, act_dim, hidden_sizes, hidden_acts):

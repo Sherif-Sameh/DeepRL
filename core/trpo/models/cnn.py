@@ -108,8 +108,8 @@ class CNNActor(nn.Module):
         """Evaluates and returns TRPO's surrogate objective function by
         updating the policy and comparing the log probabilites of the given 
         actions to those previously computed. All steps are executed under
-        torch.no_grad() and returned value is NumPy not torch.Tensor. 
-        Typically called after parameter update to evaluate new policy. """
+        torch.no_grad(). Typically called after parameter update to evaluate 
+        new policy. """
         pass
 
     @abc.abstractmethod
@@ -165,9 +165,10 @@ class CNNActorDiscrete(CNNActor):
     
     def surrogate_obj(self, obs, act, adv, log_prob_prev):
         self.update_policy(obs) # update policy after parameter update
-        log_prob = self.log_prob_no_grad(act).cpu().numpy()
+        log_prob = self.log_prob_no_grad(act)
+        loss_pi = torch.mean(torch.exp(log_prob - log_prob_prev) * adv)
         
-        return np.mean(np.exp(log_prob - log_prob_prev) * adv)
+        return loss_pi
     
     def kl_divergence_grad(self):
         # Note: self.pi should've been already updated by log_prob_grad()
@@ -219,9 +220,10 @@ class CNNActorContinuous(CNNActor):
     
     def surrogate_obj(self, obs, act, adv, log_prob_prev):
         self.update_policy(obs) # update policy after parameter update
-        log_prob = self.log_prob_no_grad(act).cpu().numpy()
-
-        return np.mean(np.exp(log_prob - log_prob_prev) * adv)
+        log_prob = self.log_prob_no_grad(act)
+        loss_pi = torch.mean(torch.exp(log_prob - log_prob_prev) * adv)
+        
+        return loss_pi
     
     def kl_divergence_grad(self):
         # Note: self.pi should've been already updated by log_prob_grad()
@@ -296,11 +298,14 @@ class CNNActorCritic(nn.Module):
         else:
             raise NotImplementedError
         
-        # Initialize shared feature extractor as well as actor and critic
-        self.feature_ext = FeatureExtractor(obs_dim, in_channels, out_channels,
-                                            kernel_sizes, strides, features_out)
-        self.actor = actor_type(self.feature_ext, act_dim)
-        self.critic = CNNCritic(self.feature_ext)
+        # Initialize feature extractors as well as actor and critic
+        # Note: Parameter sharing is not possible with TRPO
+        feature_ext_actor = FeatureExtractor(obs_dim, in_channels, out_channels,
+                                             kernel_sizes, strides, features_out)
+        feature_ext_critic = FeatureExtractor(obs_dim, in_channels, out_channels,
+                                              kernel_sizes, strides, features_out)
+        self.actor = actor_type(feature_ext_actor, act_dim)
+        self.critic = CNNCritic(feature_ext_critic)
     
     def step(self, obs):
         act = self.actor(obs)
@@ -318,15 +323,16 @@ class CNNActorCritic(nn.Module):
     
     # Only for tracing the actor and critic's networks for tensorboard
     def forward(self, obs):
-        features = self.feature_ext(obs)
-        act = self.actor.actor_head(features)
-        val = self.critic.critic_head(features)
+        act_features = self.actor.feature_ext(obs)
+        obs_features = self.critic.feature_ext(obs)
+        act = self.actor.actor_head(act_features)
+        val = self.critic.critic_head(obs_features)
 
         return act, val
     
     def layer_summary(self):
-        print('Feature Extractor Summary: \n')
-        self.feature_ext.layer_summary()
+        print('Feature Extractor Summary (same architecture for both actor and critic): \n')
+        self.actor.feature_ext.layer_summary()
 
         print('Actor Head: \n')
         self.actor.layer_summary()

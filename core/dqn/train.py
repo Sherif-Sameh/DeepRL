@@ -3,6 +3,7 @@ import gymnasium as gym
 from gymnasium.vector import AsyncVectorEnv
 from gymnasium.spaces import Discrete
 from gymnasium.wrappers import FrameStackObservation, GrayscaleObservation
+from gymnasium.wrappers.vector import NormalizeReward
 import time
 import numpy as np
 import torch
@@ -47,8 +48,9 @@ class ReplayBuffer:
             self.ctr[env_id] = 0
             self.buf_full[env_id] = True
 
-    def get_batch(self):
-        to_tensor = lambda np_arr, dtype: torch.as_tensor(np_arr, dtype=dtype)
+    def get_batch(self, device):
+        to_tensor = lambda np_arr, dtype: torch.as_tensor(np_arr, dtype=dtype, 
+                                                          device=device)
         env_bs = self.batch_size // self.obs.shape[0]
 
         # Initialize empty batches for storing samples from the environments
@@ -78,8 +80,8 @@ class ReplayBuffer:
     def get_buffer_size(self):
         return np.sum(self.env_buf_size * self.buf_full + self.ctr * (1 - self.buf_full))
 
-    def get_weights(self):
-        return torch.ones(self.batch_size, dtype=torch.float32)
+    def get_weights(self, device):
+        return torch.ones(self.batch_size, dtype=torch.float32, device=device)
     
     def update_beta(self):
         return
@@ -123,8 +125,9 @@ class PrioritizedReplayBuffer(ReplayBuffer):
             self.ctr[env_id] = 0
             self.buf_full[env_id] = True
 
-    def get_batch(self):
-        to_tensor = lambda np_arr, dtype: torch.as_tensor(np_arr, dtype=dtype)
+    def get_batch(self, device):
+        to_tensor = lambda np_arr, dtype: torch.as_tensor(np_arr, dtype=dtype,
+                                                          device=device)
         env_bs = self.batch_size // self.obs.shape[0]
 
         # Initialize empty batches for storing samples from the environments
@@ -158,8 +161,8 @@ class PrioritizedReplayBuffer(ReplayBuffer):
                 to_tensor(rew, torch.float32), to_tensor(obs_next, torch.float32), \
                 to_tensor(done, torch.bool)
 
-    def get_weights(self):
-        return torch.as_tensor(self.weights, dtype=torch.float32)
+    def get_weights(self, device):
+        return torch.as_tensor(self.weights, dtype=torch.float32, device=device)
 
     def update_beta(self):
         self.beta = min(self.beta + self.beta_rate, 1.0)
@@ -173,61 +176,40 @@ class PrioritizedReplayBuffer(ReplayBuffer):
 
     
 class DQNTrainer:
-    def __calc_td_error(self, q_net: MLPDQN, gamma, obs: torch.Tensor, act: torch.Tensor,
-                      rew: torch.Tensor, obs_next: torch.Tensor, done: torch.Tensor):
-        # Get current and target Q vals and mask target Q vals where done is True
-        q_vals = q_net.forward_grad(obs, act)
-        q_vals_target = q_net.forward_target(obs_next)
-        q_vals_target[done] = 0.0
+    def __init__(self, policy, env_fn, wrappers_kwargs=dict(), use_gpu=False, model_path='', 
+                 dueling=False, double_q=False, q_net_kwargs=dict(), seed=0, 
+                 prioritized_replay=False, prioritized_replay_alpha=0.6, 
+                 prioritized_replay_beta0=0.4, prioritized_replay_beta_rate=0.0, 
+                 prioritized_replay_eps=1e-6, eps_init=1.0, eps_final=0.05, eps_decay_rate=0.2, 
+                 buf_size=1000000, steps_per_epoch=1000, batch_size=100,
+                 learning_starts=1000, train_freq=4, target_network_update_freq=500, 
+                 num_test_episodes=10, gamma=0.99, lr=5e-4, lr_f=None, max_grad_norm=0.5, 
+                 clip_grad=True, log_dir=None, save_freq=10, checkpoint_freq=25):
+        # Store needed hyperparameters
+        self.seed = seed
+        self.steps_per_epoch = steps_per_epoch
+        self.learning_starts = learning_starts
+        self.train_freq = train_freq
+        self.target_network_update_freq = target_network_update_freq
+        self.num_test_episodes = num_test_episodes
+        self.gamma = gamma
+        self.lr = lr
+        self.lr_f = lr_f
+        self.max_grad_norm = max_grad_norm
+        self.clip_grad = clip_grad
+        self.save_freq = save_freq
+        self.checkpoint_freq = checkpoint_freq
 
-        # Calculate TD target and error
-        td_target = rew + gamma * q_vals_target
-        td_error = td_target - q_vals
-
-        return td_error
-    
-    def __update_params(self, device, q_net: MLPDQN, buf: ReplayBuffer, q_optim: Adam, 
-                        writer: SummaryWriter, epoch, gamma, update_target_network):
-        # Get mini-batch and perform one parameter update for the Q network
-        obs, act, rew, obs_next, done = buf.get_batch()
-        obs, act, rew, obs_next, done = obs.to(device), act.to(device), rew.to(device), \
-                                        obs_next.to(device), done.to(device)
-
-        q_optim.zero_grad()
-        td_error = self.__calc_td_error(q_net, gamma, obs, act, 
-                                        rew, obs_next, done)
-        loss_weights = buf.get_weights().to(device)
-        loss_q = ((td_error * loss_weights)**2).mean()
-        loss_q.backward()
-        q_optim.step()
-        buf.update_priorities(td_error.detach().cpu().numpy())
-
-        # Update target Q network values if neccessary
-        if update_target_network == True:
-            q_net.update_target()
-
-        # Log epoch statistics
-        writer.add_scalar('Loss/LossQ', loss_q.item(), epoch+1)
-    
-    def train_mod(self, policy, env_fn, wrappers_kwargs=dict(), use_gpu=False, model_path='', 
-                  dueling=False, double_q=False, q_net_kwargs=dict(), seed=0, 
-                  prioritized_replay=False, prioritized_replay_alpha=0.6, 
-                  prioritized_replay_beta0=0.4, prioritized_replay_beta_rate=0.0, 
-                  prioritized_replay_eps=1e-6, eps_init=1.0, eps_final=0.05, eps_decay_rate=0.2, 
-                  buf_size=1000000, steps_per_epoch=4000, batch_size=400, epochs=100, 
-                  learning_starts=1000, train_freq=1, target_network_update_freq=500, 
-                  num_test_episodes=10, gamma=0.99, lr=5e-4, lr_f=None, log_dir=None, 
-                  save_freq=10, checkpoint_freq=25):
         # Serialize local hyperparameters
         locals_dict = locals()
         locals_dict.pop('self'); locals_dict.pop('env_fn'); locals_dict.pop('wrappers_kwargs')
         locals_dict = serialize_locals(locals_dict)
 
         # Initialize logger and save hyperparameters
-        writer = SummaryWriter(log_dir=log_dir)
-        writer.add_hparams(locals_dict, {}, run_name=f'../{os.path.basename(writer.get_logdir())}')
-        save_dir = os.path.join(writer.get_logdir(), 'pyt_save')
-        os.makedirs(save_dir, exist_ok=True)
+        self.writer = SummaryWriter(log_dir=log_dir)
+        self.writer.add_hparams(locals_dict, {}, run_name=f'../{os.path.basename(self.writer.get_logdir())}')
+        self.save_dir = os.path.join(self.writer.get_logdir(), 'pyt_save')
+        os.makedirs(self.save_dir, exist_ok=True)
 
         # Determine DQN variant to use
         if (dueling==True) and (double_q==True):
@@ -240,22 +222,21 @@ class DQNTrainer:
             q_net = MLPDQN if policy == 'mlp' else CNNDQN
 
         # Initialize environment and attempt to save a copy of it 
-        env = AsyncVectorEnv(env_fn)
+        self.env = AsyncVectorEnv(env_fn)
         try:
-            save_env(env_fn[0], wrappers_kwargs, log_dir, render_mode='human')
-            save_env(env_fn[0], wrappers_kwargs, log_dir, render_mode='rgb_array')
+            save_env(env_fn[0], wrappers_kwargs, self.writer.get_logdir(), render_mode='human')
+            save_env(env_fn[0], wrappers_kwargs, self.writer.get_logdir(), render_mode='rgb_array')
         except Exception as e:
             print(f'Could not save environment: {e} \n\n')
         
         # Initialize Q-network
         if len(model_path) > 0:
-            q_net_mod = torch.load(model_path)
+            self.q_net_mod = torch.load(model_path, weights_only=False)
+            self.q_net_mod = self.q_net_mod.to(torch.device('cpu'))
         else:
-            q_net_mod = q_net(env, eps_init, eps_final, eps_decay_rate, **q_net_kwargs)
-        q_net_mod.layer_summary()
-        writer.add_graph(q_net_mod, torch.randn(size=env.observation_space.shape))
-
-        local_steps_per_epoch = steps_per_epoch // env.num_envs
+            self.q_net_mod = q_net(self.env, eps_init, eps_final, eps_decay_rate, **q_net_kwargs)
+        self.q_net_mod.layer_summary()
+        self.writer.add_graph(self.q_net_mod, torch.randn(size=self.env.observation_space.shape))
 
         # Setup random seed number for PyTorch and NumPy
         torch.manual_seed(seed=seed)
@@ -263,62 +244,112 @@ class DQNTrainer:
 
         # GPU setup if necessary
         if use_gpu == True:
-            device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+            self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
             torch.cuda.manual_seed(seed=seed)
             torch.backends.cudnn.deterministic = True
             torch.backends.cudnn.benchmark = True
         else:
-            device = torch.device('cpu')
-        q_net_mod.to(device)
+            self.device = torch.device('cpu')
+        self.q_net_mod.to(self.device)
 
         # Initialize the experience replay buffer
         if prioritized_replay==True:
-            prioritized_replay_beta_rate = (1.0 - prioritized_replay_beta0)/(epochs-1) \
-                if prioritized_replay_beta_rate is None else prioritized_replay_beta_rate
-            buf = PrioritizedReplayBuffer(env, buf_size, batch_size, 
+            self.buf = PrioritizedReplayBuffer(self.env, buf_size, batch_size * self.env.num_envs, 
                                           prioritized_replay_alpha, prioritized_replay_beta0,
                                           prioritized_replay_beta_rate, prioritized_replay_eps)
         else:
-            buf = ReplayBuffer(env, buf_size, batch_size)
+            self.buf = ReplayBuffer(self.env, buf_size, batch_size * self.env.num_envs)
 
-        # Initialize optimizer and scheduler
-        q_optim = Adam(q_net_mod.parameters(), lr=lr)
-        end_factor = lr_f/lr if lr_f is not None else 1.0
-        q_scheduler = LinearLR(q_optim, start_factor=1.0, end_factor=end_factor, 
+        # Initialize optimizer
+        self.q_optim = Adam(self.q_net_mod.parameters(), lr=lr)
+        
+    def __calc_td_error(self, obs: torch.Tensor, act: torch.Tensor, rew: torch.Tensor, 
+                        obs_next: torch.Tensor, done: torch.Tensor):
+        # Get current and target Q vals and mask target Q vals where done is True
+        q_vals = self.q_net_mod.forward_grad(obs, act)
+        q_vals_target = self.q_net_mod.forward_target(obs_next)
+        q_vals_target[done] = 0.0
+
+        # Calculate TD target and error
+        td_target = rew + self.gamma * q_vals_target
+        td_error = td_target - q_vals
+
+        return td_error
+    
+    def __update_params(self, epoch, update_target_network):
+        # Get mini-batch and perform one parameter update for the Q network
+        obs, act, rew, obs_next, done = self.buf.get_batch(self.device)
+
+        # Calculate Q-function loss and gradients
+        self.q_optim.zero_grad()
+        td_error = self.__calc_td_error(obs, act, rew, obs_next, done)
+        loss_weights = self.buf.get_weights(self.device)
+        loss_q = ((td_error * loss_weights)**2).mean()
+        loss_q.backward()
+
+        # Clip gradients (if neccesary) and update parameters
+        if self.clip_grad == True:
+            torch.nn.utils.clip_grad_norm_(self.q_net_mod.parameters(), 
+                                           self.max_grad_norm)
+        self.q_optim.step()
+        self.buf.update_priorities(td_error.detach().cpu().numpy())
+
+        # Update target Q network values if neccessary
+        if update_target_network == True:
+            self.q_net_mod.update_target()
+
+        # Log epoch statistics
+        self.writer.add_scalar('Loss/LossQ', loss_q.item(), epoch+1)
+    
+    def train_mod(self, epochs=100):
+        # Initialize beta rate if buffer is a PRB
+        if isinstance(self.buf, PrioritizedReplayBuffer):
+            self.buf.beta_rate = (1.0 - self.buf.beta)/(epochs-1) \
+                if self.buf.beta_rate is None else self.buf.beta_rate
+        
+        # Initialize scheduler
+        end_factor = self.lr_f/self.lr if self.lr_f is not None else 1.0
+        q_scheduler = LinearLR(self.q_optim, start_factor=1.0, end_factor=end_factor, 
                                total_iters=epochs)
 
+        # Normalize returns for more stable training
+        if not isinstance(self.env, NormalizeReward):
+            self.env = NormalizeReward(self.env)
+
         # Initialize environment variables
-        obs, _ = env.reset(seed=seed)
+        obs, _ = self.env.reset(seed=self.seed)
         start_time = time.time()
-        autoreset = np.zeros(env.num_envs)
+        autoreset = np.zeros(self.env.num_envs)
         q_vals = []
 
         for epoch in range(epochs):
-            for step in range(local_steps_per_epoch):
-                act, q_val = q_net_mod.step(torch.as_tensor(obs, dtype=torch.float32, device=device))
-                obs_next, rew, terminated, truncated, _ = env.step(act)
+            for step in range(self.steps_per_epoch):
+                act, q_val = self.q_net_mod.step(torch.as_tensor(obs, dtype=torch.float32, 
+                                                                 device=self.device))
+                obs_next, rew, terminated, truncated, _ = self.env.step(act)
 
-                for env_id in range(env.num_envs):
+                for env_id in range(self.env.num_envs):
                     if not autoreset[env_id]:
-                        buf.update_buffer(env_id, obs[env_id], act[env_id], rew[env_id], 
-                                          q_val[env_id], terminated[env_id])
+                        self.buf.update_buffer(env_id, obs[env_id], act[env_id], rew[env_id], 
+                                               q_val[env_id], terminated[env_id])
                         q_vals.append(q_val[env_id])
                 obs = obs_next
                 autoreset = np.logical_or(terminated, truncated)
                 
-                if (buf.get_buffer_size() >= learning_starts) \
-                    and ((step % train_freq) == 0):
-                    global_step = step * env.num_envs + epoch * steps_per_epoch
-                    update_target_network = (global_step % target_network_update_freq) == 0
-                    self.__update_params(device, q_net_mod, buf, q_optim, writer, 
-                                         epoch, gamma, update_target_network)
+                if (self.buf.get_buffer_size() >= self.learning_starts) \
+                    and ((step % self.train_freq) == 0):
+                    global_step = (step + epoch * self.steps_per_epoch) * self.env.num_envs
+                    update_target_network = (global_step % self.target_network_update_freq) == 0
+                    self.__update_params(epoch, update_target_network)
 
-            # Evaluate deterministic policy
+            # Evaluate deterministic policy (skip return normalization wrapper)
+            env = self.env.env if isinstance(self.env, NormalizeReward) else self.env 
             ep_len, ep_ret = np.zeros(env.num_envs), np.zeros(env.num_envs)
             ep_lens, ep_rets = [], []
             obs, _ = env.reset()
-            while len(ep_lens) < num_test_episodes*env.num_envs:
-                act = q_net_mod.act(torch.as_tensor(obs, dtype=torch.float32, device=device))
+            while len(ep_lens) < self.num_test_episodes*env.num_envs:
+                act = self.q_net_mod.act(torch.as_tensor(obs, dtype=torch.float32, 
+                                                         device=self.device))
                 obs, rew, terminated, truncated, _ = env.step(act)
                 ep_len, ep_ret = ep_len + 1, ep_ret + rew
                 done = np.logical_or(terminated, truncated)
@@ -328,33 +359,34 @@ class DQNTrainer:
                             ep_lens.append(ep_len[env_id])
                             ep_rets.append(ep_ret[env_id])
                             ep_len[env_id], ep_ret[env_id] = 0, 0
-            obs, _ = env.reset()
+            obs, _ = self.env.reset()
 
-            if (epoch % save_freq) == 0:
-                torch.save(q_net_mod, os.path.join(save_dir, 'model.pt'))
-            if ((epoch + 1) % checkpoint_freq) == 0:
-                torch.save(q_net_mod, os.path.join(save_dir, f'model{epoch+1}.pt'))
+            if (epoch % self.save_freq) == 0:
+                torch.save(self.q_net_mod, os.path.join(self.save_dir, 'model.pt'))
+            if ((epoch + 1) % self.checkpoint_freq) == 0:
+                torch.save(self.q_net_mod, os.path.join(self.save_dir, f'model{epoch+1}.pt'))
 
             q_scheduler.step()
-            q_net_mod.update_eps_exp()
-            buf.update_beta()
+            self.q_net_mod.update_eps_exp()
+            self.buf.update_beta()
             
             # Log info about epoch
+            total_steps_so_far = (epoch+1)*self.steps_per_epoch*self.env.num_envs
             ep_lens, ep_rets, q_vals = np.array(ep_lens), np.array(ep_rets), np.array(q_vals)
-            writer.add_scalar('EpLen/mean', ep_lens.mean(), (epoch+1)*steps_per_epoch)
-            writer.add_scalar('EpRet/mean', ep_rets.mean(), (epoch+1)*steps_per_epoch)
-            writer.add_scalar('EpRet/max', ep_rets.max(), (epoch+1)*steps_per_epoch)
-            writer.add_scalar('EpRet/min', ep_rets.min(), (epoch+1)*steps_per_epoch)
-            writer.add_scalar('QVals/mean', q_vals.mean(), epoch+1)
-            writer.add_scalar('QVals/max', q_vals.max(), epoch+1)
-            writer.add_scalar('QVals/min', q_vals.min(), epoch+1)
-            writer.add_scalar('Time', time.time()-start_time, epoch+1)
-            writer.flush()
+            self.writer.add_scalar('EpLen/mean', ep_lens.mean(), total_steps_so_far)
+            self.writer.add_scalar('EpRet/mean', ep_rets.mean(), total_steps_so_far)
+            self.writer.add_scalar('EpRet/max', ep_rets.max(), total_steps_so_far)
+            self.writer.add_scalar('EpRet/min', ep_rets.min(), total_steps_so_far)
+            self.writer.add_scalar('QVals/mean', q_vals.mean(), epoch+1)
+            self.writer.add_scalar('QVals/max', q_vals.max(), epoch+1)
+            self.writer.add_scalar('QVals/min', q_vals.min(), epoch+1)
+            self.writer.add_scalar('Time', time.time()-start_time, epoch+1)
+            self.writer.flush()
             q_vals = []
         
         # Save final model
-        torch.save(q_net_mod, os.path.join(save_dir, 'model.pt'))
-        writer.close()
+        torch.save(self.q_net_mod, os.path.join(self.save_dir, 'model.pt'))
+        self.writer.close()
         print(f'Model {epochs} (final) saved successfully')
 
 if __name__ == '__main__':
@@ -387,17 +419,19 @@ if __name__ == '__main__':
     # Rest of training arguments
     parser.add_argument('--seed', '-s', type=int, default=0)
     parser.add_argument('--buf_size', type=int, default=1000000)
-    parser.add_argument('--steps', type=int, default=4000)
-    parser.add_argument('--batch_size', type=int, default=400)
+    parser.add_argument('--steps', type=int, default=1000)
+    parser.add_argument('--batch_size', type=int, default=100)
     parser.add_argument('--epochs', type=int, default=100)  
     parser.add_argument('--max_ep_len', type=int, default=-1)
     parser.add_argument('--learning_starts', type=int, default=1000)
-    parser.add_argument('--train_freq', type=int, default=1)
+    parser.add_argument('--train_freq', type=int, default=4)
     parser.add_argument('--target_network_update_freq', type=int, default=500)
     parser.add_argument('--num_test_episodes', type=int, default=10)
     parser.add_argument('--gamma', type=float, default=0.99)
     parser.add_argument('--lr', type=float, default=5e-4)
-    parser.add_argument('--lr_f', type=float, default=5e-4)
+    parser.add_argument('--lr_f', type=float, default=None)
+    parser.add_argument('--max_grad_norm', type=float, default=0.5)
+    parser.add_argument('--clip_grad', type=bool, default=True)
     parser.add_argument('--save_freq', type=int, default=10)
     parser.add_argument('--checkpoint_freq', type=int, default=25)
     parser.add_argument('--exp_name', type=str, default='dqn')
@@ -422,10 +456,10 @@ if __name__ == '__main__':
         wrappers_kwargs = dict()
     elif args.policy == 'cnn':
         q_net_kwargs = dict(in_channels=args.in_channels, 
-                         out_channels=args.out_channels,
-                         kernel_sizes=args.kernel_sizes, 
-                         strides=args.strides, 
-                         features_out=args.features_out)
+                            out_channels=args.out_channels,
+                            kernel_sizes=args.kernel_sizes, 
+                            strides=args.strides, 
+                            features_out=args.features_out)
         env_fn_def = lambda render_mode=None: gym.make(args.env, max_episode_steps=max_ep_len, 
                                                        render_mode=render_mode)
         env_fn = [lambda render_mode=None: FrameStackObservation(SkipAndScaleObservation(
@@ -437,14 +471,15 @@ if __name__ == '__main__':
         raise NotImplementedError
     
     # Begin training
-    trainer = DQNTrainer()
-    trainer.train_mod(args.policy, env_fn, wrappers_kwargs=wrappers_kwargs, use_gpu=args.use_gpu, 
-                      model_path=args.model_path, dueling=args.dueling, double_q=args.double_q, 
-                      q_net_kwargs=q_net_kwargs, seed=args.seed, prioritized_replay=args.prioritized_replay, 
-                      eps_init=args.eps_init, eps_final=args.eps_final, eps_decay_rate=args.eps_decay_rate, 
-                      buf_size=args.buf_size, steps_per_epoch=args.steps, batch_size=args.batch_size,
-                      epochs=args.epochs, learning_starts=args.learning_starts, train_freq=args.train_freq, 
-                      target_network_update_freq=args.target_network_update_freq, 
-                      num_test_episodes=args.num_test_episodes, gamma=args.gamma, lr=args.lr, 
-                      lr_f=args.lr_f, log_dir=log_dir, save_freq=args.save_freq, 
-                      checkpoint_freq=args.checkpoint_freq)
+    trainer = DQNTrainer(args.policy, env_fn, wrappers_kwargs=wrappers_kwargs, use_gpu=args.use_gpu, 
+                         model_path=args.model_path, dueling=args.dueling, double_q=args.double_q, 
+                         q_net_kwargs=q_net_kwargs, seed=args.seed, prioritized_replay=args.prioritized_replay, 
+                         eps_init=args.eps_init, eps_final=args.eps_final, eps_decay_rate=args.eps_decay_rate, 
+                         buf_size=args.buf_size, steps_per_epoch=args.steps, batch_size=args.batch_size,
+                         learning_starts=args.learning_starts, train_freq=args.train_freq, 
+                         target_network_update_freq=args.target_network_update_freq, 
+                         num_test_episodes=args.num_test_episodes, gamma=args.gamma, lr=args.lr,
+                         lr_f=args.lr_f, max_grad_norm=args.max_grad_norm, clip_grad=args.clip_grad, 
+                         log_dir=log_dir, save_freq=args.save_freq, checkpoint_freq=args.checkpoint_freq)
+    
+    trainer.train_mod(args.epochs)

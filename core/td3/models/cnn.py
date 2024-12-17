@@ -72,6 +72,7 @@ class CNNCritic(nn.Module):
 
         # Gather critic's independent layers
         layers = []
+        hidden_sizes = [] if hidden_sizes is None else hidden_sizes
         hidden_sizes = [hidden_sizes] if not isinstance(hidden_sizes, list) else hidden_sizes
         hidden_sizes = [feature_ext.features_out + act_dim] + hidden_sizes
         for i in range(len(hidden_sizes)-1):
@@ -91,6 +92,13 @@ class CNNCritic(nn.Module):
     def forward(self, obs, act):
         return self.critic_head(torch.cat([self.feature_ext(obs), act], dim=1))
     
+    # Used in CNN-AC to track gradients only after feature extraction
+    def forward_actions(self, obs, act):
+        with torch.no_grad():
+            features = self.feature_ext(obs)
+        
+        return self.critic_head(torch.cat([features, act], dim=1))
+    
     def forward_target(self, obs, act):
         with torch.no_grad():
             q = self.critic_head_target(torch.cat([self.feature_ext_target(obs), act], dim=1))
@@ -98,7 +106,7 @@ class CNNCritic(nn.Module):
         return q
     
     def update_target(self, polyak):
-        polyak_average(self.feature_ext.parameters(), self.feature_ext_target.parameters(), polyak)
+        # Feature extractor updated through actor
         polyak_average(self.critic_head.parameters(), self.critic_head_target.parameters(), polyak)
 
     def set_grad_tracking(self, val: bool):
@@ -124,6 +132,7 @@ class CNNActor(nn.Module):
 
         # Gather actor's independent layers
         layers = []
+        hidden_sizes = [] if hidden_sizes is None else hidden_sizes
         hidden_sizes = [hidden_sizes] if not isinstance(hidden_sizes, list) else hidden_sizes
         hidden_sizes = [feature_ext.features_out] + hidden_sizes
         for i in range(len(hidden_sizes)-1):
@@ -134,7 +143,7 @@ class CNNActor(nn.Module):
 
         # Initialize the actor's head and its weights
         self.actor_head = nn.Sequential(OrderedDict(layers))
-        self.actor_head[:-2].apply(lambda m: init_weights(m, gain=1.0))
+        self.actor_head.apply(lambda m: init_weights(m, gain=1.0))
         self.actor_head[-2:].apply(lambda m: init_weights(m, gain=0.01))
 
         # Create and initialize target actor's head
