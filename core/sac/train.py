@@ -103,9 +103,9 @@ class SACTrainer:
                  buf_size=1000000, gamma=0.99, polyak=0.995, lr=3e-4, lr_f=None, 
                  max_grad_norm=0.5, clip_grad=False, alpha=0.2, alpha_min=3e-3, 
                  entropy_target=None, auto_alpha=True, batch_size=100, 
-                 start_steps=10000, learning_starts=1000, update_every=50, 
-                 num_test_episodes=10, log_dir=None, save_freq=10, 
-                 checkpoint_freq=25):
+                 start_steps=10000, learning_starts=1000, update_every=50,
+                 num_updates=-1, num_test_episodes=10, log_dir=None, 
+                 save_freq=10, checkpoint_freq=25):
         # Store needed hyperparameters
         self.seed = seed
         self.steps_per_epoch = steps_per_epoch
@@ -120,6 +120,7 @@ class SACTrainer:
         self.start_steps = start_steps
         self.learning_starts = learning_starts
         self.update_every = update_every
+        self.num_updates = num_updates if num_updates > 0 else update_every
         self.num_test_episodes = num_test_episodes
         self.save_freq = save_freq
         self.checkpoint_freq = checkpoint_freq
@@ -250,8 +251,8 @@ class SACTrainer:
 
         # Clip gradients (if neccessary and update parameters)
         if self.clip_grad == True:
-            torch.nn.utils.clip_grad_norm_(self.ac_mod.parameters(), self.max_grad_norm)
-        self.ac_mod.step()
+            torch.nn.utils.clip_grad_norm_(self.ac_mod.actor.parameters(), self.max_grad_norm)
+        self.ac_optim.step()
         
         # Update the log alpha parameter if its estimated online 
         if self.auto_alpha == True:
@@ -311,7 +312,7 @@ class SACTrainer:
 
                 if (self.buf.get_buffer_size() >= self.learning_starts) \
                     and ((step % self.update_every) == 0):
-                    for _ in range(self.update_every):
+                    for _ in range(self.num_updates):
                         self.__update_params(epoch)
             
             # Evaluate deterministic policy (skip return normalization wrapper)
@@ -335,7 +336,7 @@ class SACTrainer:
             ac_scheduler.step()
             alpha_scheduler.step()
 
-            if (epoch % self.save_freq) == 0:
+            if ((epoch + 1) % self.save_freq) == 0:
                 torch.save(self.ac_mod, os.path.join(self.save_dir, 'model.pt'))
             if ((epoch + 1) % self.checkpoint_freq) == 0:
                 torch.save(self.ac_mod, os.path.join(self.save_dir, f'model{epoch+1}.pt'))
@@ -358,6 +359,7 @@ class SACTrainer:
         # Save final model
         torch.save(self.ac_mod, os.path.join(self.save_dir, 'model.pt'))
         self.writer.close()
+        self.env.close()
         print(f'Model {epochs} (final) saved successfully')
 
 if __name__ == '__main__':
@@ -395,9 +397,10 @@ if __name__ == '__main__':
     parser.add_argument('--alpha_min', type=float, default=3e-3)
     parser.add_argument('--auto_alpha', type=bool, default=True)
     parser.add_argument('--batch_size', type=int, default=100)
-    parser.add_argument('--start_steps', type=int, default=10000)
+    parser.add_argument('--start_steps', type=int, default=2500)
     parser.add_argument('--learning_starts', type=int, default=1000)
     parser.add_argument('--update_every', type=int, default=50)
+    parser.add_argument('--num_updates', type=int, default=-1)
     parser.add_argument('--num_test_episodes', type=int, default=10)
     parser.add_argument('--max_ep_len', type=int, default=-1)
     parser.add_argument('--save_freq', type=int, default=10)
@@ -453,7 +456,8 @@ if __name__ == '__main__':
                          alpha=args.alpha, alpha_min=args.alpha_min, auto_alpha=args.auto_alpha, 
                          batch_size=args.batch_size, start_steps=args.start_steps, 
                          learning_starts=args.learning_starts, update_every=args.update_every, 
-                         num_test_episodes=args.num_test_episodes, log_dir=log_dir, 
-                         save_freq=args.save_freq, checkpoint_freq=args.checkpoint_freq)
+                         num_updates=args.num_updates, num_test_episodes=args.num_test_episodes, 
+                         log_dir=log_dir, save_freq=args.save_freq, 
+                         checkpoint_freq=args.checkpoint_freq)
 
     trainer.train_mod(args.epochs)

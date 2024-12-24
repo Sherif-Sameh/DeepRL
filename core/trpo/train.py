@@ -11,7 +11,6 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 from torch import autograd
-import torch.distributions
 from torch.optim import Adam
 from torch.optim.lr_scheduler import LinearLR
 from torch.utils.tensorboard import SummaryWriter
@@ -153,10 +152,7 @@ class PolicyOptimizer:
     def update_policy(self, epoch, obs, act, logp, adv, x: np.ndarray, 
                       Hx: np.ndarray, actor, writer: SummaryWriter):
         # Store parameters of current policy and policy itself for kl divergence
-        if isinstance(actor.pi, torch.distributions.Categorical):
-            pi_curr = torch.distributions.Categorical(logits=actor.pi.logits)
-        elif isinstance(actor.pi, torch.distributions.Normal):
-            pi_curr = torch.distributions.Normal(loc=actor.pi.mean, scale=actor.pi.stddev)
+        pi_curr = actor.copy_policy()
         params_curr = nn.utils.parameters_to_vector(actor.parameters())
 
         # Perform the backtracking line search
@@ -351,7 +347,7 @@ class TRPOTrainer:
             self.__update_params(epoch)
             val_scheduler.step()
             
-            if (epoch % self.save_freq) == 0:
+            if ((epoch + 1) % self.save_freq) == 0:
                 torch.save(self.ac_mod, os.path.join(self.save_dir, 'model.pt'))
             if ((epoch + 1) % self.checkpoint_freq) == 0:
                 torch.save(self.ac_mod, os.path.join(self.save_dir, f'model{epoch+1}.pt'))
@@ -375,6 +371,7 @@ class TRPOTrainer:
         # Save final model
         torch.save(self.ac_mod, os.path.join(self.save_dir, 'model.pt'))
         self.writer.close()
+        self.env.close()
         print(f'Backtracking line search failed {self.pi_optim.backtrack_fail_ctr} times in total')
         print(f'Model {epochs} (final) saved successfully')
 
@@ -397,6 +394,7 @@ if __name__ == '__main__':
     parser.add_argument('--kernel_sizes', nargs='+', type=int, default=[8, 4, 3])
     parser.add_argument('--strides', nargs='+', type=int, default=[4, 2, 1])
     parser.add_argument('--features_out', nargs='+', type=int, default=[512])
+    parser.add_argument('--log_std_init', nargs='+', type=float, default=[0]) # Used for MLP too
 
     # Rest of training arguments
     parser.add_argument('--seed', '-s', type=int, default=0)
@@ -437,7 +435,8 @@ if __name__ == '__main__':
         ac_kwargs = dict(hidden_sizes_actor=args.hid_act, 
                          hidden_sizes_critic=args.hid_cri,
                          hidden_acts_actor=torch.nn.Tanh, 
-                         hidden_acts_critic=torch.nn.Tanh)
+                         hidden_acts_critic=torch.nn.Tanh,
+                         log_std_init=args.log_std_init)
         env_fn = [lambda render_mode=None: gym.make(args.env, max_episode_steps=max_ep_len, 
                                                     render_mode=render_mode)] * args.cpu
         wrappers_kwargs = dict()
@@ -447,7 +446,8 @@ if __name__ == '__main__':
                          out_channels=args.out_channels,
                          kernel_sizes=args.kernel_sizes, 
                          strides=args.strides, 
-                         features_out=args.features_out)
+                         features_out=args.features_out,
+                         log_std_init=args.log_std_init)
         env_fn_def = lambda render_mode=None: gym.make(args.env, max_episode_steps=max_ep_len, 
                                                        render_mode=render_mode)
         env_fn = [lambda render_mode=None: FrameStackObservation(SkipAndScaleObservation(

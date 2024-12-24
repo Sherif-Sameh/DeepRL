@@ -96,7 +96,6 @@ if __name__ == '__main__':
     # Run policy in environment for the set number of episodes
     for ep in range(args.num_episodes):
         (obs, _), done = env.reset(), False
-        print(obs.shape)
         ep_ret, ep_len = 0, 0
         while not done:
             if args.record == True:

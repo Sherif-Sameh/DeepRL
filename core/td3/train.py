@@ -88,7 +88,7 @@ class TD3Trainer:
                  buf_size=1000000, gamma=0.99, polyak=0.995, lr=1e-3, 
                  lr_f=None, max_grad_norm=0.5, clip_grad=False, batch_size=100, 
                  start_steps=10000, learning_starts=1000, update_every=50, 
-                 target_noise=0.2, noise_clip=0.5, policy_delay=2, 
+                 num_updates=-1, target_noise=0.2, noise_clip=0.5, policy_delay=2, 
                  num_test_episodes=10, log_dir=None, save_freq=10, checkpoint_freq=20):
         # Store needed hyperparameters
         self.seed = seed
@@ -102,6 +102,7 @@ class TD3Trainer:
         self.start_steps = start_steps
         self.learning_starts = learning_starts
         self.update_every = update_every
+        self.num_updates = num_updates if num_updates > 0 else update_every
         self.target_noise = target_noise
         self.noise_clip = noise_clip
         self.policy_delay = policy_delay
@@ -204,7 +205,7 @@ class TD3Trainer:
         if update_policy == True:
             # Get actor loss (critic's weights are frozen temporarily)
             self.ac_mod.critic_1.set_grad_tracking(val=False)
-            loss_pi = self.__calc_pi_loss(ac, obs)
+            loss_pi = self.__calc_pi_loss(obs)
             self.ac_mod.critic_1.set_grad_tracking(val=True)
 
             # Combine losses and calculate gradients
@@ -213,10 +214,10 @@ class TD3Trainer:
 
             # Clip gradients (if neccessary and update parameters)
             if self.clip_grad == True:
-                torch.nn.utils.clip_grad_norm_(self.ac_mod.parameters(), self.max_grad_norm)
-            self.ac_mod.step()
+                torch.nn.utils.clip_grad_norm_(self.ac_mod.actor.parameters(), self.max_grad_norm)
+            self.ac_optim.step()
 
-            # Update target network
+            # Update actor target network
             self.ac_mod.actor.update_target(self.polyak)
             
             # Log training statistics
@@ -225,9 +226,9 @@ class TD3Trainer:
             loss = 0.5 * (loss_q1 + loss_q2)
             loss.backward()
             
-            if self.clip_grad == True:
-                torch.nn.utils.clip_grad_norm_(self.ac_mod.parameters(), self.max_grad_norm)
-            self.ac_mod.step()
+            # if self.clip_grad == True:
+            #     torch.nn.utils.clip_grad_norm_(self.ac_mod.parameters(), self.max_grad_norm)
+            self.ac_optim.step()
         
         # Update target critic networks
         self.ac_mod.critic_1.update_target(self.polyak)
@@ -275,7 +276,7 @@ class TD3Trainer:
                 
                 if (self.buf.get_buffer_size() >= self.learning_starts) \
                     and ((step % self.update_every) == 0):
-                    for j in range(self.update_every):
+                    for j in range(self.num_updates):
                         update_policy = (j % self.policy_delay) == 0 
                         self.__update_params(epoch, update_policy)
             
@@ -298,8 +299,9 @@ class TD3Trainer:
                             ep_len[env_id], ep_ret[env_id] = 0, 0
             obs, _ = self.env.reset()
             ac_scheduler.step()
+            self.ac_mod.step_action_std(epochs)
 
-            if (epoch % self.save_freq) == 0:
+            if ((epoch + 1) % self.save_freq) == 0:
                 torch.save(self.ac_mod, os.path.join(self.save_dir, 'model.pt'))
             if ((epoch + 1) % self.checkpoint_freq) == 0:
                 torch.save(self.ac_mod, os.path.join(self.save_dir, f'model{epoch+1}.pt'))
@@ -321,6 +323,7 @@ class TD3Trainer:
         # Save final model
         torch.save(self.ac_mod, os.path.join(self.save_dir, 'model.pt'))
         self.writer.close()
+        self.env.close()
         print(f'Model {epochs} (final) saved successfully')
 
 if __name__ == '__main__':
@@ -335,7 +338,8 @@ if __name__ == '__main__':
     # Common model arguments 
     parser.add_argument('--hid_act', nargs='+', type=int, default=[64, 64])
     parser.add_argument('--hid_cri', nargs='+', type=int, default=[64, 64])
-    parser.add_argument('--action_std', type=float, default=0.1)
+    parser.add_argument('--action_std', nargs='+', type=float, default=[0.1])
+    parser.add_argument('--action_std_f', nargs='+', type=float, default=[-1])
 
     # CNN model arguments
     parser.add_argument('--in_channels', type=int, default=4)
@@ -356,9 +360,10 @@ if __name__ == '__main__':
     parser.add_argument('--max_grad_norm', type=float, default=0.5)
     parser.add_argument('--clip_grad', type=bool, default=False)
     parser.add_argument('--batch_size', type=int, default=100)
-    parser.add_argument('--start_steps', type=int, default=10000)
+    parser.add_argument('--start_steps', type=int, default=2500)
     parser.add_argument('--learning_starts', type=int, default=1000)
     parser.add_argument('--update_every', type=int, default=50)
+    parser.add_argument('--num_updates', type=int, default=-1)
     parser.add_argument('--target_noise', type=float, default=0.2)
     parser.add_argument('--noise_clip', type=float, default=0.5)
     parser.add_argument('--policy_delay', type=int, default=2)
@@ -386,7 +391,8 @@ if __name__ == '__main__':
                          hidden_sizes_critic=args.hid_cri,
                          hidden_acts_actor=torch.nn.ReLU, 
                          hidden_acts_critic=torch.nn.ReLU,
-                         action_std=args.action_std)
+                         action_std=args.action_std,
+                         action_std_f=args.action_std_f)
         env_fn = [lambda render_mode=None: gym.make(args.env, max_episode_steps=max_ep_len, 
                                                     render_mode=render_mode)] * args.cpu
         wrappers_kwargs = dict()
@@ -399,7 +405,8 @@ if __name__ == '__main__':
                          features_out=args.features_out,
                          hidden_sizes_actor=args.hid_act, 
                          hidden_sizes_critic=args.hid_cri,
-                         action_std=args.action_std)
+                         action_std=args.action_std,
+                         action_std_f=args.action_std_f)
         env_fn_def = lambda render_mode=None: gym.make(args.env, max_episode_steps=max_ep_len, 
                                                        render_mode=render_mode)
         env_fn = [lambda render_mode=None: FrameStackObservation(SkipAndScaleObservation(
@@ -417,9 +424,10 @@ if __name__ == '__main__':
                          gamma=args.gamma, polyak=args.polyak, lr=args.lr, lr_f=args.lr_f, 
                          max_grad_norm=args.max_grad_norm, clip_grad=args.clip_grad, 
                          batch_size=args.batch_size, start_steps=args.start_steps, 
-                         learning_starts=args.learning_starts, update_every=args.update_every, 
-                         target_noise=args.target_noise, noise_clip=args.noise_clip, 
-                         policy_delay=args.policy_delay, num_test_episodes=args.num_test_episodes, 
-                         log_dir=log_dir, save_freq=args.save_freq, checkpoint_freq=args.checkpoint_freq)
+                         learning_starts=args.learning_starts, update_every=args.update_every,
+                         num_updates=args.num_updates, target_noise=args.target_noise, 
+                         noise_clip=args.noise_clip, policy_delay=args.policy_delay, 
+                         num_test_episodes=args.num_test_episodes, log_dir=log_dir, 
+                         save_freq=args.save_freq, checkpoint_freq=args.checkpoint_freq)
 
     trainer.train_mod(args.epochs)

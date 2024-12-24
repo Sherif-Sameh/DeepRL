@@ -180,16 +180,18 @@ class DQNTrainer:
                  dueling=False, double_q=False, q_net_kwargs=dict(), seed=0, 
                  prioritized_replay=False, prioritized_replay_alpha=0.6, 
                  prioritized_replay_beta0=0.4, prioritized_replay_beta_rate=0.0, 
-                 prioritized_replay_eps=1e-6, eps_init=1.0, eps_final=0.05, eps_decay_rate=0.2, 
-                 buf_size=1000000, steps_per_epoch=1000, batch_size=100,
-                 learning_starts=1000, train_freq=4, target_network_update_freq=500, 
-                 num_test_episodes=10, gamma=0.99, lr=5e-4, lr_f=None, max_grad_norm=0.5, 
-                 clip_grad=True, log_dir=None, save_freq=10, checkpoint_freq=25):
+                 prioritized_replay_eps=1e-6, eps_init=1.0, eps_final=0.05, 
+                 eps_decay_epochs=None, buf_size=1000000, steps_per_epoch=1000, 
+                 batch_size=100, learning_starts=1000, train_freq=4, num_updates=1, 
+                 target_network_update_freq=500, num_test_episodes=10, gamma=0.99, 
+                 lr=5e-4, lr_f=None, max_grad_norm=0.5, clip_grad=True, log_dir=None, 
+                 save_freq=10, checkpoint_freq=25):
         # Store needed hyperparameters
         self.seed = seed
         self.steps_per_epoch = steps_per_epoch
         self.learning_starts = learning_starts
         self.train_freq = train_freq
+        self.num_updates = num_updates 
         self.target_network_update_freq = target_network_update_freq
         self.num_test_episodes = num_test_episodes
         self.gamma = gamma
@@ -234,6 +236,8 @@ class DQNTrainer:
             self.q_net_mod = torch.load(model_path, weights_only=False)
             self.q_net_mod = self.q_net_mod.to(torch.device('cpu'))
         else:
+            eps_decay_rate = -np.log(eps_final/eps_init) / eps_decay_epochs \
+                if eps_decay_epochs is not None else None
             self.q_net_mod = q_net(self.env, eps_init, eps_final, eps_decay_rate, **q_net_kwargs)
         self.q_net_mod.layer_summary()
         self.writer.add_graph(self.q_net_mod, torch.randn(size=self.env.observation_space.shape))
@@ -276,7 +280,7 @@ class DQNTrainer:
 
         return td_error
     
-    def __update_params(self, epoch, update_target_network):
+    def __update_params(self, epoch):
         # Get mini-batch and perform one parameter update for the Q network
         obs, act, rew, obs_next, done = self.buf.get_batch(self.device)
 
@@ -294,14 +298,15 @@ class DQNTrainer:
         self.q_optim.step()
         self.buf.update_priorities(td_error.detach().cpu().numpy())
 
-        # Update target Q network values if neccessary
-        if update_target_network == True:
-            self.q_net_mod.update_target()
-
         # Log epoch statistics
         self.writer.add_scalar('Loss/LossQ', loss_q.item(), epoch+1)
     
     def train_mod(self, epochs=100):
+        # Initialize epsilon decay rate if not initialized
+        if self.q_net_mod.eps_decay_rate is None:
+            eps_decay_epochs = 0.2 * epochs
+            self.q_net_mod.eps_decay_rate = -np.log(self.q_net_mod.eps_min/self.q_net_mod.eps) / eps_decay_epochs
+
         # Initialize beta rate if buffer is a PRB
         if isinstance(self.buf, PrioritizedReplayBuffer):
             self.buf.beta_rate = (1.0 - self.buf.beta)/(epochs-1) \
@@ -338,9 +343,12 @@ class DQNTrainer:
                 
                 if (self.buf.get_buffer_size() >= self.learning_starts) \
                     and ((step % self.train_freq) == 0):
-                    global_step = (step + epoch * self.steps_per_epoch) * self.env.num_envs
-                    update_target_network = (global_step % self.target_network_update_freq) == 0
-                    self.__update_params(epoch, update_target_network)
+                    for _ in range(self.num_updates):
+                        self.__update_params(epoch)
+
+                if (step % self.target_network_update_freq) == 0:
+                    self.q_net_mod.update_target()
+
 
             # Evaluate deterministic policy (skip return normalization wrapper)
             env = self.env.env if isinstance(self.env, NormalizeReward) else self.env 
@@ -361,7 +369,7 @@ class DQNTrainer:
                             ep_len[env_id], ep_ret[env_id] = 0, 0
             obs, _ = self.env.reset()
 
-            if (epoch % self.save_freq) == 0:
+            if ((epoch + 1) % self.save_freq) == 0:
                 torch.save(self.q_net_mod, os.path.join(self.save_dir, 'model.pt'))
             if ((epoch + 1) % self.checkpoint_freq) == 0:
                 torch.save(self.q_net_mod, os.path.join(self.save_dir, f'model{epoch+1}.pt'))
@@ -380,6 +388,7 @@ class DQNTrainer:
             self.writer.add_scalar('QVals/mean', q_vals.mean(), epoch+1)
             self.writer.add_scalar('QVals/max', q_vals.max(), epoch+1)
             self.writer.add_scalar('QVals/min', q_vals.min(), epoch+1)
+            self.writer.add_scalar('Epsilon', self.q_net_mod.eps, epoch+1)
             self.writer.add_scalar('Time', time.time()-start_time, epoch+1)
             self.writer.flush()
             q_vals = []
@@ -387,6 +396,7 @@ class DQNTrainer:
         # Save final model
         torch.save(self.q_net_mod, os.path.join(self.save_dir, 'model.pt'))
         self.writer.close()
+        self.env.close()
         print(f'Model {epochs} (final) saved successfully')
 
 if __name__ == '__main__':
@@ -394,7 +404,7 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     # Model and environment configuration
     parser.add_argument('--policy', type=str, default='mlp')
-    parser.add_argument('--env', type=str, default='HalfCheetah-v5')
+    parser.add_argument('--env', type=str, default='CartPole-v1')
     parser.add_argument('--use_gpu', type=bool, default=False)
     parser.add_argument('--model_path', type=str, default='')
 
@@ -404,7 +414,7 @@ if __name__ == '__main__':
     parser.add_argument('--prioritized_replay', type=bool, default=False)
     parser.add_argument('--eps_init', type=float, default=1.0)
     parser.add_argument('--eps_final', type=float, default=0.05)
-    parser.add_argument('--eps_decay_rate', type=float, default=0.2)
+    parser.add_argument('--eps_decay_epochs', type=int, default=None)
 
     # MLP model arguments
     parser.add_argument('--hid', nargs='+', type=int, default=[64, 64])
@@ -425,6 +435,7 @@ if __name__ == '__main__':
     parser.add_argument('--max_ep_len', type=int, default=-1)
     parser.add_argument('--learning_starts', type=int, default=1000)
     parser.add_argument('--train_freq', type=int, default=4)
+    parser.add_argument('--num_updates', type=int, default=1)
     parser.add_argument('--target_network_update_freq', type=int, default=500)
     parser.add_argument('--num_test_episodes', type=int, default=10)
     parser.add_argument('--gamma', type=float, default=0.99)
@@ -474,10 +485,10 @@ if __name__ == '__main__':
     trainer = DQNTrainer(args.policy, env_fn, wrappers_kwargs=wrappers_kwargs, use_gpu=args.use_gpu, 
                          model_path=args.model_path, dueling=args.dueling, double_q=args.double_q, 
                          q_net_kwargs=q_net_kwargs, seed=args.seed, prioritized_replay=args.prioritized_replay, 
-                         eps_init=args.eps_init, eps_final=args.eps_final, eps_decay_rate=args.eps_decay_rate, 
+                         eps_init=args.eps_init, eps_final=args.eps_final, eps_decay_epochs=args.eps_decay_epochs, 
                          buf_size=args.buf_size, steps_per_epoch=args.steps, batch_size=args.batch_size,
                          learning_starts=args.learning_starts, train_freq=args.train_freq, 
-                         target_network_update_freq=args.target_network_update_freq, 
+                         num_updates=args.num_updates, target_network_update_freq=args.target_network_update_freq, 
                          num_test_episodes=args.num_test_episodes, gamma=args.gamma, lr=args.lr,
                          lr_f=args.lr_f, max_grad_norm=args.max_grad_norm, clip_grad=args.clip_grad, 
                          log_dir=log_dir, save_freq=args.save_freq, checkpoint_freq=args.checkpoint_freq)

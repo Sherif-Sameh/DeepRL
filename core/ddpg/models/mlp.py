@@ -138,10 +138,9 @@ class MLPActor(MLP):
 
 class MLPActorCritic(nn.Module):
     def __init__(self, env: VectorEnv, hidden_sizes_actor, hidden_sizes_critic,
-                 hidden_acts_actor, hidden_acts_critic, action_std):
+                 hidden_acts_actor, hidden_acts_critic, action_std, action_std_f):
         super().__init__()
-        self.action_std = action_std
-        self.action_max = nn.Parameter(torch.tensor(env.single_action_space.high), 
+        self.action_max = nn.Parameter(torch.tensor(env.single_action_space.high, dtype=torch.float32), 
                                        requires_grad=False)
 
         # Check the action space type and initialize the actor
@@ -153,6 +152,16 @@ class MLPActorCritic(nn.Module):
         else:
             raise NotImplementedError
         
+        # Initialize the standard deviation of actions used for training
+        if len(action_std) != act_dim: action_std = [action_std[0]] * act_dim
+        if action_std_f[0] < 0: action_std_f = action_std
+        if len(action_std_f) != act_dim: action_std_f = [action_std_f[0]] * act_dim
+        
+        action_std = torch.tensor(action_std, dtype=torch.float32)
+        action_std_f = torch.tensor(action_std_f, dtype=torch.float32)
+        self.action_std = nn.Parameter(action_std, requires_grad=False)
+        self.action_std_rate = nn.Parameter(action_std - action_std_f, requires_grad=False)
+
         # Initialize the critic (DQN)
         self.critic = MLPCritic(obs_dim, act_dim, hidden_sizes_critic,
                              hidden_acts_critic)
@@ -178,6 +187,9 @@ class MLPActorCritic(nn.Module):
         q_val = self.critic(obs, act)
 
         return act, q_val
+    
+    def step_action_std(self, epochs):
+        self.action_std.data -= (self.action_std_rate.data)/(epochs+1)
     
     def layer_summary(self):
         print('Actor Summary: \n')

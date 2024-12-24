@@ -97,6 +97,12 @@ class CNNActor(nn.Module):
         Returns the computed log probabilites. """
         pass
 
+    @abc.abstractmethod
+    def entropy_grad(self):
+        """Evaluates and returns the entropy of the current stored policy. 
+        Gradient tracking is enabled during calculation"""
+        pass
+
     def layer_summary(self):
         print(self.actor_head[0].__class__.__name__, 'input & output shapes:\t', 
               f'(1, {self.feature_ext.features_out})', f'(1, {self.act_dim})\n')
@@ -128,10 +134,17 @@ class CNNActorDiscrete(CNNActor):
 
         return self.pi.log_prob(act)
     
+    def entropy_grad(self):
+        return self.pi.entropy()
+    
 class CNNActorContinuous(CNNActor):
-    def __init__(self, feature_ext: FeatureExtractor, act_dim):
+    def __init__(self, feature_ext: FeatureExtractor, act_dim, log_std_init):
         super().__init__(feature_ext, act_dim)
-        log_std = -1.0 * torch.ones(act_dim, dtype=torch.float32)
+
+        # Initialize policy log std
+        if len(log_std_init) != act_dim:
+            log_std_init = [log_std_init[0]] * act_dim
+        log_std = torch.tensor(log_std_init, dtype=torch.float32)
         self.log_std = nn.Parameter(log_std, requires_grad=True)
 
         # Initialize the policy randomly
@@ -156,6 +169,9 @@ class CNNActorContinuous(CNNActor):
         self.pi = Normal(mean, torch.exp(self.log_std))
 
         return self.pi.log_prob(act).sum(axis=-1)
+    
+    def entropy_grad(self):
+        return self.pi.entropy().sum(dim=-1)
     
 class CNNCritic(nn.Module):
     def __init__(self, feature_ext: FeatureExtractor):
@@ -183,24 +199,25 @@ class CNNCritic(nn.Module):
     
 class CNNActorCritic(nn.Module):
     def __init__(self, env: VectorEnv, in_channels, out_channels, 
-                 kernel_sizes, strides, features_out):
+                 kernel_sizes, strides, features_out, log_std_init):
         super().__init__()
         obs_dim = env.single_observation_space.shape
 
-        # Determine action dimension from environment
+        # Initialize shared feature extractor
+        self.feature_ext = FeatureExtractor(obs_dim, in_channels, out_channels,
+                                            kernel_sizes, strides, features_out)
+        
+        # Determine action dimension from environment and initialize actor
         if isinstance(env.single_action_space, Discrete):
             act_dim = env.single_action_space.n
-            actor_type = CNNActorDiscrete
+            self.actor = CNNActorDiscrete(self.feature_ext, act_dim)
         elif isinstance(env.single_action_space, Box):
             act_dim = env.single_action_space.shape[0]
-            actor_type = CNNActorContinuous
+            self.actor = CNNActorContinuous(self.feature_ext, act_dim, log_std_init)
         else:
             raise NotImplementedError
         
-        # Initialize shared feature extractor as well as actor and critic
-        self.feature_ext = FeatureExtractor(obs_dim, in_channels, out_channels,
-                                            kernel_sizes, strides, features_out)
-        self.actor = actor_type(self.feature_ext, act_dim)
+        # Initialize critic
         self.critic = CNNCritic(self.feature_ext)
     
     def step(self, obs):

@@ -88,8 +88,8 @@ class DDPGTrainer:
                  buf_size=1000000, gamma=0.99, polyak=0.995, lr=1e-3, lr_f=None, 
                  max_grad_norm=0.5, clip_grad=False, batch_size=100, 
                  start_steps=10000, learning_starts=1000, update_every=50, 
-                 num_test_episodes=10, log_dir=None, save_freq=10, 
-                 checkpoint_freq=25):
+                 num_updates=-1, num_test_episodes=10, log_dir=None, 
+                 save_freq=10, checkpoint_freq=25):
         # Store needed hyperparameters
         self.seed = seed
         self.steps_per_epoch = steps_per_epoch
@@ -102,6 +102,7 @@ class DDPGTrainer:
         self.start_steps = start_steps
         self.learning_starts = learning_starts
         self.update_every = update_every
+        self.num_updates = num_updates if num_updates > 0 else update_every
         self.num_test_episodes = num_test_episodes
         self.save_freq = save_freq
         self.checkpoint_freq = checkpoint_freq
@@ -161,7 +162,8 @@ class DDPGTrainer:
         # Get current and target Q vals and mask target Q vals where done is True
         q_vals = self.ac_mod.critic.forward(obs, act)
         q_vals.squeeze_(dim=1)
-        q_vals_target = self.ac_mod.critic.forward_target(obs_next, ac.actor.forward_target(obs_next))
+        q_vals_target = self.ac_mod.critic.forward_target(
+            obs_next, self.ac_mod.actor.forward_target(obs_next))
         q_vals_target.squeeze_(dim=1)
         q_vals_target[done] = 0.0
 
@@ -196,7 +198,7 @@ class DDPGTrainer:
 
         # Clip gradients (if neccesary) and update parameters
         if self.clip_grad == True:
-            torch.nn.utils.clip_grad_norm_(self.ac_mod.parameters(), self.max_grad_norm)
+            torch.nn.utils.clip_grad_norm_(self.ac_mod.actor.parameters(), self.max_grad_norm)
         self.ac_optim.step()
 
         # Update target networks
@@ -243,7 +245,7 @@ class DDPGTrainer:
                 autoreset = np.logical_or(terminated, truncated)
                 
                 if (self.buf.get_buffer_size() >= self.learning_starts) \
-                    and ((step % self.update_every) == 0):
+                    and ((step % self.num_updates) == 0):
                     for _ in range(self.update_every):
                         self.__update_params(epoch)
             
@@ -266,8 +268,9 @@ class DDPGTrainer:
                             ep_len[env_id], ep_ret[env_id] = 0, 0
             obs, _ = self.env.reset()
             ac_scheduler.step()
+            self.ac_mod.step_action_std(epochs)
 
-            if (epoch % self.save_freq) == 0:
+            if ((epoch + 1) % self.save_freq) == 0:
                 torch.save(self.ac_mod, os.path.join(self.save_dir, 'model.pt'))
             if ((epoch + 1) % self.checkpoint_freq) == 0:
                 torch.save(self.ac_mod, os.path.join(self.save_dir, f'model{epoch+1}.pt'))
@@ -289,6 +292,7 @@ class DDPGTrainer:
         # Save final model
         torch.save(self.ac_mod, os.path.join(self.save_dir, 'model.pt'))
         self.writer.close()
+        self.env.close()
         print(f'Model {epochs} (final) saved successfully')
 
 if __name__ == '__main__':
@@ -303,7 +307,8 @@ if __name__ == '__main__':
     # Common model arguments 
     parser.add_argument('--hid_act', nargs='+', type=int, default=[64, 64])
     parser.add_argument('--hid_cri', nargs='+', type=int, default=[64, 64])
-    parser.add_argument('--action_std', type=float, default=0.1)
+    parser.add_argument('--action_std', nargs='+', type=float, default=[0.1])
+    parser.add_argument('--action_std_f', nargs='+', type=float, default=[-1])
 
     # CNN model arguments
     parser.add_argument('--in_channels', type=int, default=4)
@@ -324,9 +329,10 @@ if __name__ == '__main__':
     parser.add_argument('--max_grad_norm', type=float, default=0.5)
     parser.add_argument('--clip_grad', type=bool, default=False)
     parser.add_argument('--batch_size', type=int, default=100)
-    parser.add_argument('--start_steps', type=int, default=10000)
+    parser.add_argument('--start_steps', type=int, default=2500)
     parser.add_argument('--learning_starts', type=int, default=1000)
     parser.add_argument('--update_every', type=int, default=50)
+    parser.add_argument('--num_updates', type=int, default=-1)
     parser.add_argument('--num_test_episodes', type=int, default=10)
     parser.add_argument('--max_ep_len', type=int, default=-1)
     parser.add_argument('--save_freq', type=int, default=10)
@@ -351,7 +357,8 @@ if __name__ == '__main__':
                          hidden_sizes_critic=args.hid_cri,
                          hidden_acts_actor=torch.nn.ReLU, 
                          hidden_acts_critic=torch.nn.ReLU,
-                         action_std=args.action_std)
+                         action_std=args.action_std,
+                         action_std_f=args.action_std_f)
         env_fn = [lambda render_mode=None: gym.make(args.env, max_episode_steps=max_ep_len, 
                                                     render_mode=render_mode)] * args.cpu
         wrappers_kwargs = dict()
@@ -364,7 +371,8 @@ if __name__ == '__main__':
                          features_out=args.features_out,
                          hidden_sizes_actor=args.hid_act, 
                          hidden_sizes_critic=args.hid_cri,
-                         action_std=args.action_std)
+                         action_std=args.action_std,
+                         action_std_f=args.action_std_f)
         env_fn_def = lambda render_mode=None: gym.make(args.env, max_episode_steps=max_ep_len, 
                                                        render_mode=render_mode)
         env_fn = [lambda render_mode=None: FrameStackObservation(SkipAndScaleObservation(
@@ -383,7 +391,8 @@ if __name__ == '__main__':
                           max_grad_norm=args.max_grad_norm, clip_grad=args.clip_grad, 
                           batch_size=args.batch_size, start_steps=args.start_steps, 
                           learning_starts=args.learning_starts, update_every=args.update_every, 
-                          num_test_episodes=args.num_test_episodes, log_dir=log_dir, 
-                          save_freq=args.save_freq, checkpoint_freq=args.checkpoint_freq)
+                          num_updates=args.num_updates, num_test_episodes=args.num_test_episodes, 
+                          log_dir=log_dir, save_freq=args.save_freq, 
+                          checkpoint_freq=args.checkpoint_freq)
 
     trainer.train_mod(args.epochs)

@@ -74,6 +74,12 @@ class MLPActor(MLP):
         of the given actions from the policy with gradient tracking enabled.
         Returns the computed log probabilites. """
         pass
+
+    @abc.abstractmethod
+    def entropy_grad(self):
+        """Evaluates and returns the entropy of the current stored policy. 
+        Gradient tracking is enabled during calculation"""
+        pass
     
 class MLPActorDiscrete(MLPActor):
     def __init__(self, obs_dim, act_dim, hidden_sizes, hidden_acts):
@@ -102,10 +108,17 @@ class MLPActorDiscrete(MLPActor):
 
         return self.pi.log_prob(act)
     
+    def entropy_grad(self):
+        return self.pi.entropy()
+    
 class MLPActorContinuous(MLPActor):
-    def __init__(self, obs_dim, act_dim, hidden_sizes, hidden_acts):
+    def __init__(self, obs_dim, act_dim, hidden_sizes, hidden_acts, log_std_init):
         super().__init__(obs_dim, act_dim, hidden_sizes, hidden_acts)
-        log_std = -1.0 * torch.ones(act_dim, dtype=torch.float32)
+
+        # Initialize policy log std
+        if len(log_std_init) != act_dim:
+            log_std_init = [log_std_init[0]] * act_dim
+        log_std = torch.tensor(log_std_init, dtype=torch.float32)
         self.log_std = nn.Parameter(log_std, requires_grad=True)
 
         # Initialize the policy randomly
@@ -131,6 +144,9 @@ class MLPActorContinuous(MLPActor):
 
         return self.pi.log_prob(act).sum(axis=-1)
     
+    def entropy_grad(self):
+        return self.pi.entropy().sum(dim=-1)
+    
 class MLPCritic(MLP):
     def __init__(self, obs_dim, hidden_sizes, hidden_acts):
         super().__init__('critic', obs_dim, hidden_sizes, hidden_acts)
@@ -150,7 +166,7 @@ class MLPCritic(MLP):
     
 class MLPActorCritic(nn.Module):
     def __init__(self, env: VectorEnv, hidden_sizes_actor, hidden_sizes_critic, 
-                 hidden_acts_actor, hidden_acts_critic) -> None:
+                 hidden_acts_actor, hidden_acts_critic, log_std_init):
         super().__init__()
         obs_dim = env.single_observation_space.shape[0]
         self.critic = MLPCritic(obs_dim, hidden_sizes_critic, hidden_acts_critic)
@@ -162,7 +178,7 @@ class MLPActorCritic(nn.Module):
         elif isinstance(env.single_action_space, Box):
             act_dim = env.single_action_space.shape[0]
             self.actor = MLPActorContinuous(obs_dim, act_dim, hidden_sizes_actor,
-                                            hidden_acts_actor)
+                                            hidden_acts_actor, log_std_init)
         else:
             raise NotImplementedError
         

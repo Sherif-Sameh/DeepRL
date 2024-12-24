@@ -69,6 +69,11 @@ class MLPActor(MLP):
         """Updates the actor's policy using the given observations. Always,
         evaluates the network under torch.no_grad(). """
         pass
+
+    @abc.abstractmethod
+    def copy_policy(self):
+        """Initializes and returns a copy of the current policy"""
+        pass
     
     @abc.abstractmethod
     def log_prob_no_grad(self, act):
@@ -128,6 +133,9 @@ class MLPActorDiscrete(MLPActor):
         with torch.no_grad():
             logits = self.net(obs)
             self.pi = Categorical(logits=logits)
+    
+    def copy_policy(self):
+        return Categorical(logits=self.pi.logits)
 
     def log_prob_no_grad(self, act):
         with torch.no_grad():
@@ -163,9 +171,13 @@ class MLPActorDiscrete(MLPActor):
         return kl.mean()
             
 class MLPActorContinuous(MLPActor):
-    def __init__(self, obs_dim, act_dim, hidden_sizes, hidden_acts):
+    def __init__(self, obs_dim, act_dim, hidden_sizes, hidden_acts, log_std_init):
         super().__init__(obs_dim, act_dim, hidden_sizes, hidden_acts)
-        log_std = -1.0 * torch.ones(act_dim, dtype=torch.float32)
+
+        # Initialize policy log std
+        if len(log_std_init) != act_dim:
+            log_std_init = [log_std_init[0]] * act_dim
+        log_std = torch.tensor(log_std_init, dtype=torch.float32)
         self.log_std = nn.Parameter(log_std, requires_grad=True)
 
         # Initialize the policy randomly
@@ -183,6 +195,9 @@ class MLPActorContinuous(MLPActor):
         with torch.no_grad():
             mean = self.net(obs)
             self.pi = Normal(mean, torch.exp(self.log_std))
+
+    def copy_policy(self):
+        return Normal(loc=self.pi.mean, scale=self.pi.stddev)
 
     def log_prob_no_grad(self, act):
         with torch.no_grad():
@@ -255,7 +270,7 @@ class MLPCritic(MLP):
 
 class MLPActorCritic(nn.Module):
     def __init__(self, env: VectorEnv, hidden_sizes_actor, hidden_sizes_critic,
-                 hidden_acts_actor, hidden_acts_critic):
+                 hidden_acts_actor, hidden_acts_critic, log_std_init):
         super().__init__()
         obs_dim = env.single_observation_space.shape[0]
 
@@ -267,7 +282,7 @@ class MLPActorCritic(nn.Module):
         elif isinstance(env.single_action_space, Box):
             act_dim = env.single_action_space.shape[0]
             self.actor = MLPActorContinuous(obs_dim, act_dim, hidden_sizes_actor, 
-                                            hidden_acts_actor)
+                                            hidden_acts_actor, log_std_init)
         else:
             raise NotImplementedError
         

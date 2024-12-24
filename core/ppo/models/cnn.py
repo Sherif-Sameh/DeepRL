@@ -90,6 +90,11 @@ class CNNActor(nn.Module):
         """Updates the actor's policy using the given observations. Always,
         evaluates the network under torch.no_grad(). """
         pass
+
+    @abc.abstractmethod
+    def copy_policy(self):
+        """Initializes and returns a copy of the current policy"""
+        pass
     
     @abc.abstractmethod
     def log_prob_no_grad(self, act):
@@ -111,6 +116,12 @@ class CNNActor(nn.Module):
         """Evaluates and returns the KL-Divergence of the current policy 
         with respect to the given old policy. All steps are executed under
         torch.no_grad(). """
+        pass
+
+    @abc.abstractmethod
+    def entropy_grad(self):
+        """Evaluates and returns the entropy of the current stored policy. 
+        Gradient tracking is enabled during calculation"""
         pass
 
     def layer_summary(self):
@@ -138,6 +149,9 @@ class CNNActorDiscrete(CNNActor):
             logits = self.actor_head(self.feature_ext(obs))
             self.pi = Categorical(logits=logits)
 
+    def copy_policy(self):
+        return Categorical(logits=self.pi.logits)
+
     def log_prob_no_grad(self, act):
         with torch.no_grad():
             log_prob = self.pi.log_prob(act)
@@ -155,11 +169,18 @@ class CNNActorDiscrete(CNNActor):
         kl = torch.distributions.kl.kl_divergence(pi_prev, self.pi)
         
         return kl.mean()
+
+    def entropy_grad(self):
+        return self.pi.entropy()
     
 class CNNActorContinuous(CNNActor):
-    def __init__(self, feature_ext: FeatureExtractor, act_dim):
+    def __init__(self, feature_ext: FeatureExtractor, act_dim, log_std_init):
         super().__init__(feature_ext, act_dim)
-        log_std = -1.0 * torch.ones(act_dim, dtype=torch.float32)
+
+        # Initialize policy log std
+        if len(log_std_init) != act_dim:
+            log_std_init = [log_std_init[0]] * act_dim
+        log_std = torch.tensor(log_std_init, dtype=torch.float32)
         self.log_std = nn.Parameter(log_std, requires_grad=True)
 
         # Initialize the policy randomly
@@ -178,6 +199,9 @@ class CNNActorContinuous(CNNActor):
             mean = self.actor_head(self.feature_ext(obs))
             self.pi = Normal(mean, torch.exp(self.log_std))
 
+    def copy_policy(self):
+        return Normal(loc=self.pi.mean, scale=self.pi.stddev)
+    
     def log_prob_no_grad(self, act):
         with torch.no_grad():
             log_prob = self.pi.log_prob(act).sum(axis=-1)
@@ -207,6 +231,9 @@ class CNNActorContinuous(CNNActor):
         # Return the mean KL divergence over the batch
         return torch.mean(all_kls)
     
+    def entropy_grad(self):
+        return self.pi.entropy().sum(dim=-1)
+    
 class CNNCritic(nn.Module):
     def __init__(self, feature_ext: FeatureExtractor):
         super().__init__()
@@ -233,24 +260,25 @@ class CNNCritic(nn.Module):
     
 class CNNActorCritic(nn.Module):
     def __init__(self, env: VectorEnv, in_channels, out_channels, 
-                 kernel_sizes, strides, features_out):
+                 kernel_sizes, strides, features_out, log_std_init):
         super().__init__()
         obs_dim = env.single_observation_space.shape
 
-        # Determine action dimension from environment
+        # Initialize shared feature extractor
+        self.feature_ext = FeatureExtractor(obs_dim, in_channels, out_channels,
+                                            kernel_sizes, strides, features_out)
+
+        # Determine action dimension from environment and initialize actor
         if isinstance(env.single_action_space, Discrete):
             act_dim = env.single_action_space.n
-            actor_type = CNNActorDiscrete
+            self.actor = CNNActorDiscrete(self.feature_ext, act_dim)
         elif isinstance(env.single_action_space, Box):
             act_dim = env.single_action_space.shape[0]
-            actor_type = CNNActorContinuous
+            self.actor = CNNActorContinuous(self.feature_ext, act_dim, log_std_init)
         else:
             raise NotImplementedError
         
-        # Initialize shared feature extractor as well as actor and critic
-        self.feature_ext = FeatureExtractor(obs_dim, in_channels, out_channels,
-                                            kernel_sizes, strides, features_out)
-        self.actor = actor_type(self.feature_ext, act_dim)
+        # Initialize critic
         self.critic = CNNCritic(self.feature_ext)
     
     def step(self, obs):

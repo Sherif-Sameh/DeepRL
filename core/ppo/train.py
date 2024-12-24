@@ -8,7 +8,6 @@ from gymnasium.wrappers.utils import RunningMeanStd
 import time
 import numpy as np
 import torch
-import torch.distributions
 import torch.nn.functional as F
 from torch.optim import Adam
 from torch.optim.lr_scheduler import LinearLR
@@ -100,7 +99,7 @@ class PPOTrainer:
                  ac=MLPActorCritic, ac_kwargs=dict(), seed=0, steps_per_epoch=1000, 
                  batch_size=100, gamma=0.99, clip_ratio=0.2, lr=3e-4, lr_f=None, 
                  ent_coeff=0.0, vf_coeff=0.5, max_grad_norm=0.5, clip_grad=True, train_iters=10, 
-                 lam=0.95, target_kl=0.01, log_dir=None, save_freq=10, 
+                 lam=0.95, target_kl=None, log_dir=None, save_freq=10, 
                  checkpoint_freq=25):
         # Store needed hyperparameters
         self.seed = seed
@@ -175,14 +174,16 @@ class PPOTrainer:
         clipped_ratio = torch.clamp(ratio, 
                                     1 - self.clip_ratio,
                                     1 + self.clip_ratio)
-        surrogate_obj = -(torch.min(ratio * adv, other=(clipped_ratio * adv))).mean()
+        surrogate_obj = -(torch.minimum(ratio * adv, other=(clipped_ratio * adv))).mean()
         
         return surrogate_obj
     
     def __calc_entropy_loss(self):
-        entropy_loss = -(self.ac_mod.actor.pi.entropy().mean())
+        entropy = self.ac_mod.actor.entropy_grad()
+        entropy_loss = -(entropy.mean())
 
         return entropy_loss
+
     
     def __calc_val_loss(self, obs: torch.Tensor, rtg: torch.Tensor):
         val = self.ac_mod.critic.forward_grad(obs)
@@ -191,21 +192,14 @@ class PPOTrainer:
     
     def __update_params(self, epoch):
         # Store old policy for KL early stopping
-        def copy_policy(actor):
-            actor.update_policy(torch.as_tensor(self.buf.obs.reshape((-1,)+self.buf.obs_shape), 
-                            dtype=torch.float32, device=self.device))
-            if isinstance(self.ac_mod.actor.pi, torch.distributions.Categorical):
-                pi_curr = torch.distributions.Categorical(logits=self.ac_mod.actor.pi.logits)
-            elif isinstance(self.ac_mod.actor.pi, torch.distributions.Normal):
-                pi_curr = torch.distributions.Normal(loc=self.ac_mod.actor.pi.mean, 
-                                                    scale=self.ac_mod.actor.pi.stddev)
-            return pi_curr
+        self.ac_mod.actor.update_policy(torch.as_tensor(self.buf.obs.reshape((-1,)+self.buf.obs_shape), 
+                        dtype=torch.float32, device=self.device))
+        pi_curr = self.ac_mod.actor.copy_policy()
         
         # Loop train_iters times over the whole dataset (unless early stopping occurs)
+        kl_valid = True
+        kl_divs = []
         for i in range(self.train_iters):
-            # Update previous policy
-            pi_curr = copy_policy(self.ac_mod.actor)
-
             # Get dataloader for performing mini-batch SGD updates
             dataloader = self.buf.get_dataloader(self.device)
             
@@ -231,19 +225,24 @@ class PPOTrainer:
                     torch.nn.utils.clip_grad_norm_(self.ac_mod.parameters(), self.max_grad_norm)
                 self.ac_optim.step()
 
-            # Check KL-Divergence constraint for triggering early stopping
-            kl = self.ac_mod.actor.kl_divergence(
-                torch.as_tensor(self.buf.obs.reshape((-1,)+self.buf.obs_shape), 
-                                dtype=torch.float32, device=self.device), pi_curr)
-            if kl > 1.5 * self.target_kl:
-                print(f'Actor updates cut-off after {i+1} iterations by KL {kl}')
+                # Check KL-Divergence constraint for triggering early stopping
+                kl = self.ac_mod.actor.kl_divergence(
+                    torch.as_tensor(self.buf.obs.reshape((-1,)+self.buf.obs_shape), 
+                                    dtype=torch.float32, device=self.device), pi_curr)
+                kl_divs.append(kl.item())
+                if (self.target_kl is not None) and (kl > 1.5 * self.target_kl):
+                    # print(f'Actor updates cut-off after {i+1} iterations by KL {kl}')
+                    kl_valid = False
+            
+            # Stop training if KL divergence exceeded target KL
+            if kl_valid == False:
                 break
 
         # Log epoch statistics
         self.writer.add_scalar('Loss/LossPi', loss_pi.item(), epoch+1)
         self.writer.add_scalar('Loss/LossEnt', loss_ent.item(), epoch+1)
         self.writer.add_scalar('Loss/LossV', loss_val.item(), epoch+1)
-        self.writer.add_scalar('Pi/KL', kl.item(), epoch+1)
+        self.writer.add_scalar('Pi/KL', np.mean(kl_divs), epoch+1)
 
     
     def train_mod(self, epochs=100):
@@ -292,7 +291,7 @@ class PPOTrainer:
             self.__update_params(epoch)
             ac_scheduler.step()
             
-            if (epoch % self.save_freq) == 0:
+            if ((epoch + 1) % self.save_freq) == 0:
                 torch.save(self.ac_mod, os.path.join(self.save_dir, 'model.pt'))
             if ((epoch + 1) % self.checkpoint_freq) == 0:
                 torch.save(self.ac_mod, os.path.join(self.save_dir, f'model{epoch+1}.pt'))
@@ -316,6 +315,7 @@ class PPOTrainer:
         # Save final model
         torch.save(self.ac_mod, os.path.join(self.save_dir, 'model.pt'))
         self.writer.close()
+        self.env.close()
         print(f'Model {epochs} (final) saved successfully')
 
 if __name__ == '__main__':
@@ -337,6 +337,7 @@ if __name__ == '__main__':
     parser.add_argument('--kernel_sizes', nargs='+', type=int, default=[8, 4, 3])
     parser.add_argument('--strides', nargs='+', type=int, default=[4, 2, 1])
     parser.add_argument('--features_out', nargs='+', type=int, default=[512])
+    parser.add_argument('--log_std_init', nargs='+', type=float, default=[0]) # Used for MLP too
 
     # Rest of training arguments
     parser.add_argument('--seed', '-s', type=int, default=0)
@@ -354,7 +355,7 @@ if __name__ == '__main__':
     parser.add_argument('--train_iters', type=int, default=10)
     parser.add_argument('--lam', type=float, default=0.95)
     parser.add_argument('--max_ep_len', type=int, default=-1)
-    parser.add_argument('--target_kl', type=float, default=0.01)
+    parser.add_argument('--target_kl', type=float, default=None)
     parser.add_argument('--save_freq', type=int, default=10)
     parser.add_argument('--checkpoint_freq', type=int, default=25)
     parser.add_argument('--exp_name', type=str, default='ppo')
@@ -376,7 +377,8 @@ if __name__ == '__main__':
         ac_kwargs = dict(hidden_sizes_actor=args.hid_act, 
                          hidden_sizes_critic=args.hid_cri,
                          hidden_acts_actor=torch.nn.Tanh, 
-                         hidden_acts_critic=torch.nn.Tanh)
+                         hidden_acts_critic=torch.nn.Tanh,
+                         log_std_init=args.log_std_init)
         env_fn = [lambda render_mode=None: gym.make(args.env, max_episode_steps=max_ep_len, 
                                                     render_mode=render_mode)] * args.cpu
         wrappers_kwargs = dict()
@@ -386,7 +388,8 @@ if __name__ == '__main__':
                          out_channels=args.out_channels,
                          kernel_sizes=args.kernel_sizes, 
                          strides=args.strides, 
-                         features_out=args.features_out)
+                         features_out=args.features_out,
+                         log_std_init=args.log_std_init)
         env_fn_def = lambda render_mode=None: gym.make(args.env, max_episode_steps=max_ep_len, 
                                                        render_mode=render_mode)
         env_fn = [lambda render_mode=None: FrameStackObservation(SkipAndScaleObservation(

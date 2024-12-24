@@ -106,7 +106,7 @@ class CNNCritic(nn.Module):
         return q
     
     def update_target(self, polyak):
-        # Feature extractor updated through actor
+        polyak_average(self.feature_ext.parameters(), self.feature_ext_target.parameters(), polyak)
         polyak_average(self.critic_head.parameters(), self.critic_head_target.parameters(), polyak)
 
     def set_grad_tracking(self, val: bool):
@@ -161,7 +161,6 @@ class CNNActor(nn.Module):
         return a
 
     def update_target(self, polyak):
-        polyak_average(self.feature_ext.parameters(), self.feature_ext_target.parameters(), polyak)
         polyak_average(self.actor_head.parameters(), self.actor_head_target.parameters(), polyak)
     
     def layer_summary(self):
@@ -175,9 +174,8 @@ class CNNActor(nn.Module):
 class CNNActorCritic(nn.Module):
     def __init__(self, env: VectorEnv, in_channels, out_channels, 
                  kernel_sizes, strides, features_out, hidden_sizes_actor, 
-                 hidden_sizes_critic, action_std):
+                 hidden_sizes_critic, action_std, action_std_f):
         super().__init__()
-        self.action_std = action_std
         self.action_max = nn.Parameter(torch.tensor(env.single_action_space.high), 
                                        requires_grad=False)
 
@@ -187,6 +185,16 @@ class CNNActorCritic(nn.Module):
             act_dim = env.single_action_space.shape[0]
         else:
             raise NotImplementedError
+        
+        # Initialize the standard deviation of actions used for training
+        if len(action_std) != act_dim: action_std = [action_std[0]] * act_dim
+        if action_std_f[0] < 0: action_std_f = action_std
+        if len(action_std_f) != act_dim: action_std_f = [action_std_f[0]] * act_dim
+
+        action_std = torch.tensor(action_std, dtype=torch.float32)
+        action_std_f = torch.tensor(action_std_f, dtype=torch.float32)
+        self.action_std = nn.Parameter(action_std, requires_grad=False)
+        self.action_std_rate = nn.Parameter(action_std - action_std_f, requires_grad=False)
         
         # Initialize the feature extractors, critic and actor
         self.feature_ext = FeatureExtractor(obs_dim, in_channels, out_channels, 
@@ -206,7 +214,7 @@ class CNNActorCritic(nn.Module):
             act = torch.max(torch.min(act + self.action_std * torch.randn_like(act),
                                       self.action_max), -self.action_max)
             q_val = self.critic.critic_head(torch.cat([features, act], dim=1))
-        
+
         return act.cpu().numpy(), q_val.cpu().numpy().squeeze()
 
     def act(self, obs):
@@ -225,6 +233,9 @@ class CNNActorCritic(nn.Module):
         q_val = self.critic.critic_head(torch.cat([features, act], dim=1))
 
         return act, q_val
+    
+    def step_action_std(self, epochs):
+        self.action_std.data -= (self.action_std_rate.data)/(epochs+1)
     
     def layer_summary(self):
         print('Feature Extractor Summary: \n')
