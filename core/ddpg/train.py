@@ -245,8 +245,8 @@ class DDPGTrainer:
                 autoreset = np.logical_or(terminated, truncated)
                 
                 if (self.buf.get_buffer_size() >= self.learning_starts) \
-                    and ((step % self.num_updates) == 0):
-                    for _ in range(self.update_every):
+                    and ((step % self.update_every) == 0):
+                    for _ in range(self.num_updates):
                         self.__update_params(epoch)
             
             # Evaluate deterministic policy (skip return normalization wrapper)
