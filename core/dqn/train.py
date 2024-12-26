@@ -207,6 +207,9 @@ class DQNTrainer:
         locals_dict.pop('self'); locals_dict.pop('env_fn'); locals_dict.pop('wrappers_kwargs')
         locals_dict = serialize_locals(locals_dict)
 
+        # Remove existing logs if run already exists
+        clear_logs(log_dir)
+        
         # Initialize logger and save hyperparameters
         self.writer = SummaryWriter(log_dir=log_dir)
         self.writer.add_hparams(locals_dict, {}, run_name=f'../{os.path.basename(self.writer.get_logdir())}')
@@ -453,9 +456,6 @@ if __name__ == '__main__':
     current_script_dir = os.path.dirname(os.path.abspath(__file__))
     log_dir = current_script_dir + '/../../runs/' + args.env + '/'
     log_dir += args.exp_name + '/' + args.exp_name + f'_s{args.seed}'
-
-    # Remove existing logs if run already exists
-    clear_logs(log_dir)
 
     # Determine type of policy and setup its arguments and environment
     max_ep_len = args.max_ep_len if args.max_ep_len > 0 else None
