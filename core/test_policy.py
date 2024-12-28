@@ -97,6 +97,8 @@ if __name__ == '__main__':
     for ep in range(args.num_episodes):
         (obs, _), done = env.reset(), False
         ep_ret, ep_len = 0, 0
+        if hasattr(model, 'reset_hidden_states'):
+            model.reset_hidden_states(device)
         while not done:
             if args.record == True:
                 env.render()

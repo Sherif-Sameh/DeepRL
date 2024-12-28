@@ -234,6 +234,9 @@ class CNNActorCritic(nn.Module):
         
         return self.actor(obs).cpu().numpy()
     
+    def get_terminal_value(self, obs, batch_idx):
+        return self.critic(obs[batch_idx].unsqueeze(0)).cpu().numpy()
+    
     # Only for tracing the actor and critic's networks for tensorboard
     def forward(self, obs):
         features = self.feature_ext(obs)

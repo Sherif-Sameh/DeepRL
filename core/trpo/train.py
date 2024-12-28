@@ -335,8 +335,8 @@ class TRPOTrainer:
                 if np.any(autoreset):
                     for env_id in range(self.env.num_envs):
                         if autoreset[env_id]:
-                            val_terminal = 0 if terminated[env_id] else self.ac_mod.critic(torch.as_tensor(
-                                obs[env_id][None], dtype=torch.float32, device=self.device)).cpu().numpy()
+                            val_terminal = 0 if terminated[env_id] else self.ac_mod.get_terminal_value(
+                                torch.as_tensor(obs, dtype=torch.float32, device=self.device), env_id)
                             ep_ret = self.buf.terminate_ep(env_id, ep_len[env_id], val_terminal)
                             ep_lens.append(ep_len[env_id])
                             ep_rets.append(ep_ret)
@@ -346,6 +346,7 @@ class TRPOTrainer:
                     obs, _ = self.env.reset()
                     self.buf.terminate_epoch()
                     ep_len = np.zeros_like(ep_len)
+                    autoreset = np.zeros(self.env.num_envs)
             
             self.__update_params(epoch)
             val_scheduler.step()

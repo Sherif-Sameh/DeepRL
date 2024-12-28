@@ -38,32 +38,66 @@ class FeatureExtractor(nn.Module):
         # Determine number of output features based on observation space
         fe_out = self.net(torch.randn((1, in_channels, *self.img_dim), dtype=torch.float32))
 
-        # Add linear layers and initialize them
+        # Add all LSTM layers
         features_out = [features_out] if not isinstance(features_out, list) else features_out
         features_out = [fe_out.shape[1]] + features_out
-        self.linear = nn.Sequential()
+        self.lstm = nn.Sequential()
         for i in range(len(features_out)-1):
-            self.linear.add_module(f'fe_fc_hidden_{i+1}', nn.Linear(features_out[i], features_out[i+1]))
-            self.linear.add_module(f'fe_fc_act_{i+1}', nn.ReLU())
-        self.linear.apply(lambda m: init_weights(m, gain=1.0))
-    
+            self.lstm.add_module(f'fe_lstm_{i+1}', nn.LSTM(features_out[i], features_out[i+1],
+                                                           batch_first=True))    
+            
+        # Store the number of hidden units in each LSTM layer and initialize their hidden states
+        self.lstm_hiddens = features_out[1:]
+        self.lstm_h = [None] * len(self.lstm_hiddens)
+        self.lstm_c = [None] * len(self.lstm_hiddens)
+        self.reset_hidden_state_all(device=torch.device('cpu'))
+
     def forward(self, obs):
-        return self.linear(self.net(obs))
-    
+        # Evaluate Conv. layers on flattened input sequences
+        fe_out = self.net(obs.flatten(0, 1))
+
+        # Reshape output and evaluate LSTMs
+        fe_out = fe_out.view(*obs.shape[:2], fe_out.shape[-1])
+        for i, layer in enumerate(self.lstm):
+            fe_out, (h, c) = layer(fe_out, (self.lstm_h[i], self.lstm_c[i]))
+            self.lstm_h[i], self.lstm_c[i] = h.detach().clone(), c.detach().clone()
+
+        return fe_out
+
+    """ Resets a specific batch index for all hidden states across all LSTM layers. Typically 
+    used for resetting the hidden state of a specific environment during rollouts. """ 
+    def reset_hidden_state(self, device, batch_idx):
+        for i, hidden_size in enumerate(self.lstm_hiddens):
+            self.lstm_h[i][0, batch_idx] = torch.zeros(hidden_size, dtype=torch.float32,
+                                                       device=device)
+            self.lstm_c[i][0, batch_idx] = torch.zeros(hidden_size, dtype=torch.float32,
+                                                       device=device)
+
+    """ Re-initializes all hidden states across all LSTM layers with the given batch size. 
+    Typically used before loss computation and at the end of an epoch. """             
+    def reset_hidden_state_all(self, device, batch_size=1):
+        for i, hidden_size in enumerate(self.lstm_hiddens):
+            self.lstm_h[i] = torch.zeros((1, batch_size, hidden_size), dtype=torch.float32,
+                                         device=device)
+            self.lstm_c[i] = torch.zeros((1, batch_size, hidden_size), dtype=torch.float32,
+                                         device=device)
+
     def layer_summary(self):
         x = torch.randn((1, self.in_channels, *self.img_dim), dtype=torch.float32)
         for layer in self.net:
             input_shape = x.shape
             x = layer(x)
             print(layer.__class__.__name__, 'input & output shapes:\t', input_shape, x.shape)
-        for layer in self.linear:
+        x = x.reshape(1, 1, -1)
+        for i, layer in enumerate(self.lstm):
             input_shape = x.shape
-            x = layer(x)
+            h0 = torch.zeros((1, 1, self.lstm_hiddens[i]), dtype=torch.float32)
+            c0 = torch.zeros((1, 1, self.lstm_hiddens[i]), dtype=torch.float32)
+            x, _ = layer(x, (h0, c0))
             print(layer.__class__.__name__, 'input & output shapes:\t', input_shape, x.shape)
         print('\n')
 
-
-class CNNCritic(nn.Module):
+class CNNLSTMCritic(nn.Module):
     def __init__(self, feature_ext: FeatureExtractor, feature_ext_target:FeatureExtractor,
                  act_dim, hidden_sizes):
         super().__init__()
@@ -90,19 +124,27 @@ class CNNCritic(nn.Module):
         for param in self.critic_head_target.parameters():
             param.requires_grad = False
 
-    def forward(self, obs, act):
-        return self.critic_head(torch.cat([self.feature_ext(obs), act], dim=1))
+    def forward(self, obs, act, features=None):
+        if features is None: features = self.feature_ext(obs)
+        q = self.critic_head(torch.cat([features, act], dim=2).flatten(0, 1))
+        q = q.view(*features.shape[:2], 1)
+
+        return q
     
     # Used in CNN-AC to track gradients only after feature extraction
     def forward_actions(self, obs, act):
         with torch.no_grad():
             features = self.feature_ext(obs)
+        q = self.critic_head[torch.cat([features, act], dim=2).flatten(0, 1)]
+        q = q.view(*obs.shape[:2], 1)
         
-        return self.critic_head(torch.cat([features, act], dim=1))
+        return q
     
     def forward_target(self, obs, act):
         with torch.no_grad():
-            q = self.critic_head_target(torch.cat([self.feature_ext_target(obs), act], dim=1))
+            features = self.feature_ext_target(obs)
+            q = self.critic_head_target(torch.cat([features, act], dim=2).flatten(0, 1))
+            q = q.view(*obs.shape[:2], 1)
         
         return q
     
@@ -123,7 +165,7 @@ class CNNCritic(nn.Module):
         print('\n')
 
 
-class CNNActor(nn.Module):
+class CNNLSTMActor(nn.Module):
     def __init__(self, feature_ext: FeatureExtractor, feature_ext_target: FeatureExtractor, 
                  act_dim, hidden_sizes, action_max):
         super().__init__()
@@ -152,12 +194,17 @@ class CNNActor(nn.Module):
         for param in self.actor_head_target.parameters():
             param.requires_grad = False
     
-    def forward(self, obs):
-        return self.actor_head(self.feature_ext(obs)) * self.action_max
+    def forward(self, obs, features=None):
+        if features is None: features = self.feature_ext(obs) 
+        a = self.actor_head(features.flatten(0, 1)) * self.action_max
+        a = a.view(*features.shape[:2], self.act_dim)
+
+        return a
     
     def forward_target(self, obs):
         with torch.no_grad():
-            a = self.actor_head_target(self.feature_ext_target(obs)) * self.action_max
+            a = self.actor_head_target(self.feature_ext_target(obs).flatten(0, 1)) * self.action_max
+            a = a.view(*obs.shape[:2], self.act_dim)
         
         return a
 
@@ -172,7 +219,7 @@ class CNNActor(nn.Module):
             print(layer.__class__.__name__, 'input & output shapes:\t', input_shape, x.shape)
         print('\n')
     
-class CNNActorCritic(nn.Module):
+class CNNLSTMActorCritic(nn.Module):
     def __init__(self, env: VectorEnv, in_channels, out_channels, 
                  kernel_sizes, strides, features_out, hidden_sizes_actor, 
                  hidden_sizes_critic, action_std, action_std_f):
@@ -203,41 +250,48 @@ class CNNActorCritic(nn.Module):
         self.feature_ext_target = deepcopy(self.feature_ext)
         for param in self.feature_ext_target.parameters(): 
             param.requires_grad = False
-        self.actor = CNNActor(self.feature_ext, self.feature_ext_target, 
-                              act_dim, hidden_sizes_actor, self.action_max)
-        self.critic_1 = CNNCritic(self.feature_ext, self.feature_ext_target, 
-                                  act_dim, hidden_sizes_critic)
-        self.critic_2 = CNNCritic(self.feature_ext, self.feature_ext_target, 
-                                  act_dim, hidden_sizes_critic)
+        self.actor = CNNLSTMActor(self.feature_ext, self.feature_ext_target, 
+                                  act_dim, hidden_sizes_actor, self.action_max)
+        self.critic_1 = CNNLSTMCritic(self.feature_ext, self.feature_ext_target, 
+                                      act_dim, hidden_sizes_critic)
+        self.critic_2 = CNNLSTMCritic(self.feature_ext, self.feature_ext_target, 
+                                      act_dim, hidden_sizes_critic)
         
     def step(self, obs):
         with torch.no_grad():
-            features = self.feature_ext(obs)
-            act = self.actor.actor_head(features)
+            features = self.feature_ext(obs.unsqueeze(1))
+            act = self.actor.forward(obs, features=features)
             act = torch.max(torch.min(act + self.action_std * torch.randn_like(act),
                                       self.action_max), -self.action_max)
-            q_val = self.critic_1.critic_head(torch.cat([features, act], dim=1))
+            q_val = self.critic_1.forward(obs, act, features=features)
         
-        return act.cpu().numpy(), q_val.cpu().numpy().squeeze()
+        return act.squeeze(1).cpu().numpy(), q_val.cpu().numpy().squeeze()
 
     def act(self, obs):
         with torch.no_grad():
+            # Make sure that obs always has batch and sequence dimensions
             if obs.ndim == 3:
-                act = self.actor.forward(obs[None]).squeeze(dim=0)
+                act = self.actor.forward(obs.unsqueeze(0).unsqueeze(0)).squeeze(0, 1)
             else:
-                act = self.actor.forward(obs)
+                act = self.actor.forward(obs.unsqueeze(1)).squeeze(1)
         
         return act.cpu().numpy()
     
-    # Empty method used only by LSTM actor-critics
+    # Clears LSTM hidden states across a single or all batch indices
     def reset_hidden_states(self, device, batch_size=1, batch_idx=None):
-        pass
+        if batch_idx is None:
+            self.feature_ext.reset_hidden_state_all(device, batch_size=batch_size)
+            self.feature_ext_target.reset_hidden_state_all(device, batch_size=batch_size)
+        else:
+            self.feature_ext.reset_hidden_state(device, batch_idx=batch_idx)
+            self.feature_ext_target.reset_hidden_state(device, batch_idx=batch_idx)
     
     # Only for tracing the actor and critic's networks for tensorboard
     def forward(self, obs):
-        features = self.feature_ext(obs)
-        act = self.actor.actor_head(features)
-        q_val = self.critic_1.critic_head(torch.cat([features, act], dim=1))
+        self.reset_hidden_states(torch.device('cpu'), batch_idx=obs.shape[0])
+        features = self.feature_ext(obs.unsqueeze(1))
+        act = self.actor.forward(obs, features=features)
+        q_val = self.critic_1.forward(obs, act, features=features)
 
         return act, q_val
     

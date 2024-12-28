@@ -11,11 +11,12 @@ import torch
 import torch.nn.functional as F
 from torch.optim import Adam
 from torch.optim.lr_scheduler import LinearLR
-from torch.utils.data import TensorDataset, DataLoader
+from torch.utils.data import Dataset, TensorDataset, DataLoader
 from torch.utils.tensorboard import SummaryWriter
 
 from core.ppo.models.mlp import MLPActorCritic
 from core.ppo.models.cnn import CNNActorCritic
+from core.ppo.models.cnn_lstm import CNNLSTMActorCritic
 from core.rl_utils import SkipAndScaleObservation, save_env
 from core.utils import serialize_locals, clear_logs
 
@@ -92,15 +93,71 @@ class PPOBuffer:
                                 to_tensor(self.logp.reshape(-1)),
                                 to_tensor(self.rtg.reshape(-1)))
 
-        return DataLoader(dataset, batch_size=self.batch_size, shuffle=True)            
+        return DataLoader(dataset, batch_size=self.batch_size, shuffle=True)
+
+class PPOSequenceBuffer(PPOBuffer, Dataset):
+    def __init__(self, env: AsyncVectorEnv, buf_size, batch_size, 
+                 gamma, lam, seq_len, seq_prefix, stride):
+        super().__init__(env, buf_size, batch_size, gamma, lam)
+        self.device = None
+        self.seq_len = seq_len
+        self.seq_prefix = seq_prefix
+        self.stride = stride
+        self.num_sequences_env = ((buf_size//env.num_envs) - seq_len) // stride + 1
+        self.num_sequences = self.num_sequences_env * env.num_envs
+
+        # Initialize array for storing the episode number of each experience tuple collected
+        self.ep_nums = np.zeros((env.num_envs, buf_size//env.num_envs), dtype=np.int64)
+        self.ep_num_ctrs = np.zeros(env.num_envs, dtype=np.int64)
+
+    def __len__(self):
+        return self.num_sequences
+    
+    def __getitem__(self, idx):
+        to_tensor = lambda np_arr, dtype: torch.as_tensor(np_arr, dtype=dtype, device=self.device)
+
+        # Calculate start and environment indices from sequence index
+        env_id = idx // self.num_sequences_env
+        start_idx = (idx - env_id*self.num_sequences_env) * self.stride
+
+        # Extract experience sequences
+        obs_seq = to_tensor(self.obs[env_id, start_idx:start_idx+self.seq_len], torch.float32)
+        act_seq = to_tensor(self.act[env_id, start_idx:start_idx+self.seq_len], torch.float32)
+        adv_seq = to_tensor(self.adv[env_id, start_idx:start_idx+self.seq_len], torch.float32)
+        logp_seq = to_tensor(self.logp[env_id, start_idx:start_idx+self.seq_len], torch.float32)
+        rtg_seq = to_tensor(self.rtg[env_id, start_idx:start_idx+self.seq_len], torch.float32)
+        seq_mask = to_tensor(self.ep_nums[env_id, start_idx:start_idx+self.seq_len]\
+                             ==self.ep_nums[env_id, start_idx], torch.bool)
+        seq_mask[:self.seq_prefix] = False
+        
+        return obs_seq, act_seq, adv_seq, logp_seq, rtg_seq, seq_mask
+
+    def update_buffer(self, env_id, obs, act, rew, val, logp, step):
+        super().update_buffer(env_id, obs, act, rew, val, logp, step)
+        self.ep_nums[env_id, step] = self.ep_num_ctrs[env_id]
+    
+    def terminate_ep(self, env_id, ep_len, val_terminal):
+        ep_ret = super().terminate_ep(env_id, ep_len, val_terminal)
+        self.ep_num_ctrs[env_id] += 1
+
+        return ep_ret
+    
+    def terminate_epoch(self):
+        super().terminate_epoch()
+        self.ep_num_ctrs = np.zeros_like(self.ep_num_ctrs)
+    
+    def get_dataloader(self, device):
+        self.device = device
+
+        return DataLoader(self, batch_size=self.batch_size, shuffle=True, drop_last=True)
 
 class PPOTrainer:
     def __init__(self, env_fn, wrappers_kwargs=dict(), use_gpu=False, model_path='', 
                  ac=MLPActorCritic, ac_kwargs=dict(), seed=0, steps_per_epoch=1000, 
                  batch_size=100, gamma=0.99, clip_ratio=0.2, lr=3e-4, lr_f=None, 
-                 ent_coeff=0.0, vf_coeff=0.5, max_grad_norm=0.5, clip_grad=True, train_iters=10, 
-                 lam=0.95, target_kl=None, log_dir=None, save_freq=10, 
-                 checkpoint_freq=25):
+                 ent_coeff=0.0, vf_coeff=0.5, max_grad_norm=0.5, clip_grad=True, 
+                 train_iters=10, lam=0.95, target_kl=None, seq_len=40, seq_prefix=20,
+                 seq_stride=10, log_dir=None, save_freq=10, checkpoint_freq=25):
         # Store needed hyperparameters
         self.seed = seed
         self.steps_per_epoch = steps_per_epoch
@@ -112,7 +169,7 @@ class PPOTrainer:
         self.max_grad_norm = max_grad_norm
         self.clip_grad = clip_grad
         self.train_iters = train_iters
-        self.target_kl = target_kl
+        self.target_kl = target_kl if ac!=CNNLSTMActorCritic else None
         self.save_freq = save_freq
         self.checkpoint_freq = checkpoint_freq
 
@@ -164,34 +221,42 @@ class PPOTrainer:
         self.ac_mod.to(self.device)
 
         # Initialize the experience buffer for training
-        self.buf = PPOBuffer(self.env, steps_per_epoch * self.env.num_envs, 
-                             batch_size * self.env.num_envs, gamma, lam)
+        if ac != CNNLSTMActorCritic:
+            self.buf = PPOBuffer(self.env, steps_per_epoch * self.env.num_envs, 
+                                 batch_size * self.env.num_envs, gamma, lam)
+        else:
+            self.buf = PPOSequenceBuffer(self.env, steps_per_epoch * self.env.num_envs,
+                                         batch_size * self.env.num_envs, gamma, lam,
+                                         seq_len + seq_prefix, seq_prefix, seq_stride)
 
         # Initialize optimizer
         self.ac_optim = Adam(self.ac_mod.parameters(), lr=lr)
 
-    def __calc_policy_loss(self, obs: torch.Tensor, act: torch.Tensor,
-                           adv: torch.Tensor, logp: torch.Tensor):
+    def __calc_policy_loss(self, obs: torch.Tensor, act: torch.Tensor, adv: torch.Tensor, 
+                           logp: torch.Tensor, loss_mask: torch.Tensor):
         log_prob = self.ac_mod.actor.log_prob_grad(obs, act)
         ratio = torch.exp(log_prob - logp)
         clipped_ratio = torch.clamp(ratio, 
                                     1 - self.clip_ratio,
                                     1 + self.clip_ratio)
-        surrogate_obj = -(torch.minimum(ratio * adv, other=(clipped_ratio * adv))).mean()
-        
+        surrogate_obj = (torch.minimum(ratio * adv, other=(clipped_ratio * adv)))
+        surrogate_obj = -(surrogate_obj[loss_mask]).mean()
+    
         return surrogate_obj
     
-    def __calc_entropy_loss(self):
+    def __calc_entropy_loss(self, loss_mask: torch.Tensor):
         entropy = self.ac_mod.actor.entropy_grad()
-        entropy_loss = -(entropy.mean())
-
+        entropy_loss = -(entropy[loss_mask].mean())
+        
         return entropy_loss
 
     
-    def __calc_val_loss(self, obs: torch.Tensor, rtg: torch.Tensor):
+    def __calc_val_loss(self, obs: torch.Tensor, rtg: torch.Tensor,
+                        loss_mask: torch.Tensor):
         val = self.ac_mod.critic.forward_grad(obs)
-
-        return F.mse_loss(val, rtg)
+        val_loss = F.mse_loss(val[loss_mask], rtg[loss_mask])
+        
+        return val_loss 
     
     def __update_params(self, epoch):
         # Store old policy for KL early stopping
@@ -207,17 +272,27 @@ class PPOTrainer:
             dataloader = self.buf.get_dataloader(self.device)
             
             # Loop over dataset in mini-batches
-            for obs, act, adv, logp, rtg in dataloader:
+            for batch in dataloader:
+                # Clear gradients
                 self.ac_optim.zero_grad()
+
+                # Unpack experience tuple
+                if len(batch) == 6:
+                    obs, act, adv, logp, rtg, mask = batch
+                else:
+                    obs, act, adv, logp, rtg = batch
+                    mask = torch.full(obs.shape[0], fill_value=True)
                 
                 # Normalize advantages mini-batch wise
                 adv_mean, adv_std = adv.mean(), adv.std()
                 adv = (adv - adv_mean) / adv_std
 
                 # Get policy, entropy and value losses
-                loss_pi = self.__calc_policy_loss(obs, act, adv, logp)
-                loss_ent = self.__calc_entropy_loss()
-                loss_val = self.__calc_val_loss(obs, rtg)
+                self.ac_mod.reset_hidden_states(self.device, batch_size=obs.shape[0])
+                loss_pi = self.__calc_policy_loss(obs, act, adv, logp, loss_mask=mask)
+                loss_ent = self.__calc_entropy_loss(loss_mask=mask)
+                self.ac_mod.reset_hidden_states(self.device, batch_size=self.buf.batch_size)
+                loss_val = self.__calc_val_loss(obs, rtg, loss_mask=mask)
 
                 # Combine losses and compute gradients
                 loss = loss_pi + self.ent_coeff * loss_ent + self.vf_coeff * loss_val
@@ -260,6 +335,7 @@ class PPOTrainer:
         ep_lens, ep_rets = [], []
         start_time = time.time()
         autoreset = np.zeros(self.env.num_envs)
+        self.ac_mod.reset_hidden_states(self.device, batch_size=self.env.num_envs)
 
         for epoch in range(epochs):
             for step in range(self.steps_per_epoch):
@@ -279,20 +355,23 @@ class PPOTrainer:
                 if np.any(autoreset):
                     for env_id in range(self.env.num_envs):
                         if autoreset[env_id]:
-                            val_terminal = 0 if terminated[env_id] else self.ac_mod.critic(torch.as_tensor(
-                                obs[env_id][None], dtype=torch.float32, device=self.device)).cpu().numpy()
+                            val_terminal = 0 if terminated[env_id] else self.ac_mod.get_terminal_value(
+                                torch.as_tensor(obs, dtype=torch.float32, device=self.device), env_id)
                             ep_ret = self.buf.terminate_ep(env_id, ep_len[env_id], val_terminal)
                             ep_lens.append(ep_len[env_id])
                             ep_rets.append(ep_ret)
                             ep_len[env_id] = 0
+                            self.ac_mod.reset_hidden_states(self.device, batch_idx=env_id)
                 
                 if epoch_done:
                     obs, _ = self.env.reset()
                     self.buf.terminate_epoch()
                     ep_len = np.zeros_like(ep_len)
+                    autoreset = np.zeros(self.env.num_envs)
 
             self.__update_params(epoch)
             ac_scheduler.step()
+            self.ac_mod.reset_hidden_states(self.device, batch_size=self.env.num_envs)
             
             if ((epoch + 1) % self.save_freq) == 0:
                 torch.save(self.ac_mod, os.path.join(self.save_dir, 'model.pt'))
@@ -334,13 +413,18 @@ if __name__ == '__main__':
     parser.add_argument('--hid_act', nargs='+', type=int, default=[64, 64])
     parser.add_argument('--hid_cri', nargs='+', type=int, default=[64, 64])
 
-    # CNN model arguments
+    # CNN model arguments (shared by all CNN policies)
     parser.add_argument('--in_channels', type=int, default=4)
     parser.add_argument('--out_channels', nargs='+', type=int, default=[32, 64, 64])
     parser.add_argument('--kernel_sizes', nargs='+', type=int, default=[8, 4, 3])
     parser.add_argument('--strides', nargs='+', type=int, default=[4, 2, 1])
     parser.add_argument('--features_out', nargs='+', type=int, default=[512])
-    parser.add_argument('--log_std_init', nargs='+', type=float, default=[0]) # Used for MLP too
+    parser.add_argument('--log_std_init', nargs='+', type=float, default=[0]) # Used by all policies
+
+    # CNN-LSTM specific model arguments
+    parser.add_argument('--seq_len', type=int, default=40)
+    parser.add_argument('--seq_prefix', type=int, default=20)
+    parser.add_argument('--seq_stride', type=int, default=10)
 
     # Rest of training arguments
     parser.add_argument('--seed', '-s', type=int, default=0)
@@ -382,8 +466,8 @@ if __name__ == '__main__':
         env_fn = [lambda render_mode=None: gym.make(args.env, max_episode_steps=max_ep_len, 
                                                     render_mode=render_mode)] * args.cpu
         wrappers_kwargs = dict()
-    elif args.policy == 'cnn':
-        ac = CNNActorCritic
+    elif args.policy == 'cnn' or args.policy == 'cnn-lstm':
+        ac = CNNActorCritic if args.policy == 'cnn' else CNNLSTMActorCritic 
         ac_kwargs = dict(in_channels=args.in_channels, 
                          out_channels=args.out_channels,
                          kernel_sizes=args.kernel_sizes, 
@@ -408,7 +492,8 @@ if __name__ == '__main__':
                          lr_f=args.lr_f, ent_coeff=args.ent_coeff, vf_coeff=args.vf_coeff,
                          max_grad_norm=args.max_grad_norm, clip_grad=args.clip_grad, 
                          train_iters=args.train_iters, lam=args.lam, 
-                         target_kl=args.target_kl, log_dir=log_dir, 
-                         save_freq=args.save_freq, checkpoint_freq=args.checkpoint_freq)
+                         target_kl=args.target_kl, seq_len=args.seq_len, seq_prefix=args.seq_prefix,
+                         seq_stride=args.seq_stride, log_dir=log_dir, save_freq=args.save_freq, 
+                         checkpoint_freq=args.checkpoint_freq)
     
     trainer.train_mod(args.epochs)

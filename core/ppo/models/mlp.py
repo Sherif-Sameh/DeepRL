@@ -258,6 +258,13 @@ class MLPActorCritic(nn.Module):
     def act(self, obs):
         return self.actor(obs).cpu().numpy()
     
+    def get_terminal_value(self, obs, batch_idx):
+        return self.critic(obs[batch_idx]).cpu().numpy()
+    
+    # Empty method used only by LSTM actor-critics
+    def reset_hidden_states(self, device, batch_size=1, batch_idx=None):
+        pass
+    
     # Only for tracing the actor and critic's networks for tensorboard
     def forward(self, obs):
         act_net = self.actor.net(obs)

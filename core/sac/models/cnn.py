@@ -228,6 +228,10 @@ class CNNActorCritic(nn.Module):
         
         return act.cpu().numpy()
     
+    # Empty method used only by LSTM actor-critics
+    def reset_hidden_states(self, device, batch_size=1, batch_idx=None):
+        pass
+    
     # Only for tracing the actor and critic's networks for tensorboard
     def forward(self, obs):
         features = self.feature_ext(obs)
