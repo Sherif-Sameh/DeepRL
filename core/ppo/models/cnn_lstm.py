@@ -132,9 +132,10 @@ class CNNLSTMActorDiscrete(CNNLSTMActor):
         return a
 
     def update_policy(self, obs):
-        """Typically used solely for KL divergence calculation which is not supported for 
-        CNN-LSTM policies currently. """
-        pass
+        with torch.no_grad():
+            features = self.feature_ext(obs)
+            logits = self.actor_head(features.flatten(0, 1))
+            self.pi = Categorical(logits=logits.view(*features.shape[:2], self.act_dim))
 
     def copy_policy(self):
         return Categorical(logits=self.pi.logits)
@@ -152,9 +153,11 @@ class CNNLSTMActorDiscrete(CNNLSTMActor):
         return self.pi.log_prob(act)
     
     def kl_divergence(self, obs, pi_prev):
-        """ Not supported for CNN-LSTM policies due to the multiple complications involved in 
-        re-evaluating experiences gathered over multiple episodes from different environments. """
-        return torch.zeros(1)
+        obs, mask = obs # Unpack observation and episode mask tuple
+        self.update_policy(obs) # Re-evaluate policy on all observations
+        kl = torch.distributions.kl.kl_divergence(pi_prev, self.pi)
+        
+        return kl[mask].mean()
 
     def entropy_grad(self):
         return self.pi.entropy()
@@ -183,9 +186,11 @@ class CNNLSTMActorContinuous(CNNLSTMActor):
         return a
     
     def update_policy(self, obs):
-        """Typically used solely for KL divergence calculation which is not supported for 
-        CNN-LSTM policies currently. """
-        pass
+        with torch.no_grad():
+            features = self.feature_ext(obs)
+            mean = self.actor_head(features.flatten(0, 1))
+            self.pi = Normal(mean.view(*features.shape[:2], self.act_dim), 
+                             torch.exp(self.log_std))
 
     def copy_policy(self):
         return Normal(loc=self.pi.mean, scale=self.pi.stddev)
@@ -204,9 +209,22 @@ class CNNLSTMActorContinuous(CNNLSTMActor):
         return self.pi.log_prob(act).sum(axis=-1)
     
     def kl_divergence(self, obs, pi_prev):
-        """ Not supported for CNN-LSTM policies due to the multiple complications involved in 
-        re-evaluating experiences gathered over multiple episodes from different environments. """
-        return torch.zeros(1)
+        obs, mask = obs # Unpack observation and episode mask tuple
+        self.update_policy(obs) # Re-evaluate policy on all observations
+        mu1, log_std1 = self.pi.mean.detach(), self.log_std.data
+        var1 = torch.exp(2 * log_std1)
+        with torch.no_grad():
+            mu0, var0 = pi_prev.mean.detach(), pi_prev.variance.detach()
+            log_std0 = torch.log(pi_prev.stddev)
+        
+        # Compute the element-wise KL divergence
+        pre_sum = 0.5 * (((mu0 - mu1) ** 2 + var0) / (var1 + 1e-8) - 1) + log_std1 - log_std0
+        
+        # Sum over the dimensions of the distribution
+        all_kls = torch.sum(pre_sum, dim=-1)
+        
+        # Return the mean KL divergence over the batch
+        return torch.mean(all_kls[mask])
     
     def entropy_grad(self):
         return self.pi.entropy().sum(dim=-1)

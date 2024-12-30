@@ -293,7 +293,7 @@ class TD3Trainer:
             obs, act, rew, obs_next, done, mask = batch
         else:
             obs, act, rew, obs_next, done = batch
-            mask = torch.full(obs.shape[0], fill_value=True)
+            mask = torch.full((obs.shape[0],), fill_value=True)
 
         # Get critics loss
         self.ac_optim.zero_grad()

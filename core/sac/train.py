@@ -328,7 +328,7 @@ class SACTrainer:
             obs, act, logp, rew, obs_next, done, mask = batch
         else:
             obs, act, logp, rew, obs_next, done = batch
-            mask = torch.full(obs.shape[0], fill_value=True)
+            mask = torch.full((obs.shape[0],), fill_value=True)
         
         alpha_det = self.alpha_mod.forward().detach().to(self.device)
         

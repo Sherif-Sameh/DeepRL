@@ -82,7 +82,7 @@ class ReplayBuffer:
     def get_buffer_size(self):
         return np.sum(self.env_buf_size * self.buf_full + self.ctr * (1 - self.buf_full))
     
-    def terminate_ep(self, env_id):
+    def increment_ep_num(self, env_id):
         pass
 
 class SequenceReplayBuffer(ReplayBuffer):
@@ -273,7 +273,7 @@ class DDPGTrainer:
             obs, act, rew, obs_next, done, mask = batch
         else:
             obs, act, rew, obs_next, done = batch
-            mask = torch.full(obs.shape[0], fill_value=True)
+            mask = torch.full((obs.shape[0],), fill_value=True)
         
         # Get critic loss
         self.ac_optim.zero_grad()

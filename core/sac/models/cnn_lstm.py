@@ -137,7 +137,7 @@ class CNNLSTMCritic(nn.Module):
     def forward_actions(self, obs, act):
         with torch.no_grad():
             features = self.feature_ext(obs)
-        q = self.critic_head[torch.cat([features, act], dim=2).flatten(0, 1)]
+        q = self.critic_head(torch.cat([features, act], dim=2).flatten(0, 1))
         q = q.view(*obs.shape[:2], 1)
         
         return q

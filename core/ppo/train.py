@@ -94,6 +94,11 @@ class PPOBuffer:
                                 to_tensor(self.rtg.reshape(-1)))
 
         return DataLoader(dataset, batch_size=self.batch_size, shuffle=True)
+    
+    def get_all_obs(self, device):
+        to_tensor = lambda np_arr: torch.as_tensor(np_arr, dtype=torch.float32, device=device)
+
+        return to_tensor(self.obs.reshape((-1,)+self.obs_shape))
 
 class PPOSequenceBuffer(PPOBuffer, Dataset):
     def __init__(self, env: AsyncVectorEnv, buf_size, batch_size, 
@@ -150,6 +155,21 @@ class PPOSequenceBuffer(PPOBuffer, Dataset):
         self.device = device
 
         return DataLoader(self, batch_size=self.batch_size, shuffle=True, drop_last=True)
+    
+    def get_all_obs(self, device):
+        to_tensor = lambda np_arr, dtype: torch.as_tensor(np_arr, dtype=dtype, device=device)
+
+        # Create mask to mask out values at the beginning of a new episode
+        mask = np.full(self.obs.shape[:2], fill_value=True)
+        for env_id in range(self.obs.shape[0]):
+            ep_resets = np.nonzero(np.diff(self.ep_nums[env_id]) != 0)[0] + 1
+            ep_resets = np.append(ep_resets, 0)
+            mask_indices = np.array([np.arange(idx, idx+self.seq_prefix) for idx in ep_resets])
+            mask_indices = np.minimum(mask_indices, mask.shape[1] - 1)
+            mask[env_id, mask_indices] = False
+        
+        return to_tensor(self.obs, torch.float32), to_tensor(mask, torch.bool)
+                
 
 class PPOTrainer:
     def __init__(self, env_fn, wrappers_kwargs=dict(), use_gpu=False, model_path='', 
@@ -169,7 +189,7 @@ class PPOTrainer:
         self.max_grad_norm = max_grad_norm
         self.clip_grad = clip_grad
         self.train_iters = train_iters
-        self.target_kl = target_kl if ac!=CNNLSTMActorCritic else None
+        self.target_kl = target_kl
         self.save_freq = save_freq
         self.checkpoint_freq = checkpoint_freq
 
@@ -259,13 +279,13 @@ class PPOTrainer:
         return val_loss 
     
     def __update_params(self, epoch):
-        # Store old policy for KL early stopping
-        self.ac_mod.actor.update_policy(torch.as_tensor(self.buf.obs.reshape((-1,)+self.buf.obs_shape), 
-                        dtype=torch.float32, device=self.device))
+        # Store old policy and all observations for KL early stopping
+        obs_all = self.buf.get_all_obs(self.device) # Returns a tuple (obs, mask) for LSTM policies
+        self.ac_mod.reset_hidden_states(self.device, batch_size=self.env.num_envs)
+        self.ac_mod.actor.update_policy(obs_all[0] if isinstance(obs_all, tuple) else obs_all)
         pi_curr = self.ac_mod.actor.copy_policy()
-        
+
         # Loop train_iters times over the whole dataset (unless early stopping occurs)
-        kl_valid = True
         kl_divs = []
         for i in range(self.train_iters):
             # Get dataloader for performing mini-batch SGD updates
@@ -281,7 +301,7 @@ class PPOTrainer:
                     obs, act, adv, logp, rtg, mask = batch
                 else:
                     obs, act, adv, logp, rtg = batch
-                    mask = torch.full(obs.shape[0], fill_value=True)
+                    mask = torch.full((obs.shape[0],), fill_value=True)
                 
                 # Normalize advantages mini-batch wise
                 adv_mean, adv_std = adv.mean(), adv.std()
@@ -303,17 +323,12 @@ class PPOTrainer:
                     torch.nn.utils.clip_grad_norm_(self.ac_mod.parameters(), self.max_grad_norm)
                 self.ac_optim.step()
 
-                # Check KL-Divergence constraint for triggering early stopping
-                kl = self.ac_mod.actor.kl_divergence(
-                    torch.as_tensor(self.buf.obs.reshape((-1,)+self.buf.obs_shape), 
-                                    dtype=torch.float32, device=self.device), pi_curr)
-                kl_divs.append(kl.item())
-                if (self.target_kl is not None) and (kl > 1.5 * self.target_kl):
-                    # print(f'Actor updates cut-off after {i+1} iterations by KL {kl}')
-                    kl_valid = False
-            
-            # Stop training if KL divergence exceeded target KL
-            if kl_valid == False:
+            # Check KL-Divergence constraint for triggering early stopping
+            self.ac_mod.reset_hidden_states(self.device, batch_size=self.env.num_envs)
+            kl = self.ac_mod.actor.kl_divergence(obs_all, pi_curr)
+            kl_divs.append(kl.item())
+            if (self.target_kl is not None) and (kl > 1.5 * self.target_kl):
+                # print(f'Actor updates cut-off after {i+1} iterations by KL {kl}')
                 break
 
         # Log epoch statistics
@@ -378,7 +393,6 @@ class PPOTrainer:
             if ((epoch + 1) % self.checkpoint_freq) == 0:
                 torch.save(self.ac_mod, os.path.join(self.save_dir, f'model{epoch+1}.pt'))
                 
-            
             # Log info about epoch
             if len(ep_rets) > 0:
                 total_steps_so_far = (epoch+1)*self.steps_per_epoch*self.env.num_envs
@@ -422,8 +436,8 @@ if __name__ == '__main__':
     parser.add_argument('--log_std_init', nargs='+', type=float, default=[0]) # Used by all policies
 
     # CNN-LSTM specific model arguments
-    parser.add_argument('--seq_len', type=int, default=40)
-    parser.add_argument('--seq_prefix', type=int, default=20)
+    parser.add_argument('--seq_len', type=int, default=32)
+    parser.add_argument('--seq_prefix', type=int, default=16)
     parser.add_argument('--seq_stride', type=int, default=10)
 
     # Rest of training arguments
