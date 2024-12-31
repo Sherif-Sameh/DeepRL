@@ -80,7 +80,7 @@ class ReplayBuffer:
                 to_tensor(done, torch.bool)
     
     def get_buffer_size(self):
-        return np.sum(self.env_buf_size * self.buf_full + self.ctr * (1 - self.buf_full))
+        return np.mean(np.where(self.buf_full, self.env_buf_size, self.ctr))
     
     def increment_ep_num(self, env_id):
         pass
@@ -97,23 +97,6 @@ class SequenceReplayBuffer(ReplayBuffer):
         self.ep_nums = np.zeros((env.num_envs, self.env_buf_size), dtype=np.int64)
         self.ep_num_ctrs = np.zeros(env.num_envs, dtype=np.int64)
 
-    def __getitem__(self, indices):    
-        # Unpack environment and sequence indices and calculate start index
-        env_id, idx = indices
-        start_idx = idx * self.stride
-
-        # Extract experience sequences
-        obs_seq = self.obs[env_id, start_idx:start_idx+self.seq_len]
-        act_seq = self.act[env_id, start_idx:start_idx+self.seq_len]
-        rew_seq = self.rew[env_id, start_idx:start_idx+self.seq_len]
-        obs_next_seq = self.obs[env_id, start_idx+1:start_idx+self.seq_len+1]
-        done_seq = self.done[env_id, start_idx:start_idx+self.seq_len]
-        seq_mask = self.ep_nums[env_id, start_idx:start_idx+self.seq_len]\
-                    ==self.ep_nums[env_id, start_idx]
-        seq_mask[:self.seq_prefix] = False
-        
-        return obs_seq, act_seq, rew_seq, obs_next_seq, done_seq, seq_mask
-
     def update_buffer(self, env_id, obs, act, rew, q_val, done):
         super().update_buffer(env_id, obs, act, rew, q_val, done)
 
@@ -124,27 +107,39 @@ class SequenceReplayBuffer(ReplayBuffer):
     def get_batch(self, device):
         to_tensor = lambda np_arr, dtype: torch.as_tensor(np_arr, dtype=dtype, 
                                                           device=device)
-        env_bs = self.batch_size // self.obs.shape[0]
+        num_envs = self.obs.shape[0]
+        env_bs = self.batch_size // num_envs
 
-        # Initialize empty batches for storing samples from the environments
-        obs = np.zeros((self.batch_size, self.seq_len)+self.obs_shape, dtype=np.float32)
-        act = np.zeros((self.batch_size, self.seq_len)+self.act_shape, dtype=np.float32)
-        rew = np.zeros((self.batch_size, self.seq_len), dtype=np.float32)
-        obs_next = np.zeros((self.batch_size, self.seq_len)+self.obs_shape, dtype=np.float32)
-        done = np.zeros((self.batch_size, self.seq_len), dtype=np.bool)
-        seq_mask = np.zeros((self.batch_size, self.seq_len), dtype=np.bool)
+        # Calculate number for sequences available for each environment
+        num_experiences = np.where(self.buf_full, self.env_buf_size, self.ctr)
+        num_sequences = (num_experiences - self.seq_len - 1) // self.stride + 1
 
-        # Generate random indices and sample experience sequences
-        for env_id in range(self.obs.shape[0]):
-            num_exp = self.env_buf_size if self.buf_full[env_id]==True else self.ctr[env_id]
-            num_seq = (num_exp - self.seq_len - 1) // self.stride + 1
-            indices = np.random.choice(num_seq, env_bs, replace=False)
-            env_start = env_bs * env_id
+        # Generate random sequence indices for all environments
+        env_indices = []
+        seq_indices = []
+        for env_id in range(num_envs):
+            indices = np.random.choice(num_sequences[env_id], env_bs, replace=False)
+            env_indices.extend([env_id] * env_bs)
+            seq_indices.extend(indices)
+        env_indices = np.array(env_indices)
+        start_indices = np.array(seq_indices) * self.stride
 
-            for i, idx in enumerate(indices):
-                obs[env_start+i, :], act[env_start+i, :], rew[env_start+i, :], \
-                    obs_next[env_start+i, :], done[env_start+i, :], \
-                    seq_mask[env_start+i, :] = self[env_id, idx]
+        # Create sequence indices arrays using arange
+        seq_offsets = np.arange(self.seq_len)
+        obs_indices = start_indices[:, None] + seq_offsets
+        obs_next_indices = obs_indices + 1
+
+        # Sample sequences from replay buffer
+        obs = self.obs[env_indices[:, None], obs_indices]
+        act = self.act[env_indices[:, None], obs_indices]
+        rew = self.rew[env_indices[:, None], obs_indices]
+        obs_next = self.obs[env_indices[:, None], obs_next_indices]
+        done = self.done[env_indices[:, None], obs_indices]
+
+        # Create sequence mask for prefix and multi-episode sequences
+        ep_nums = self.ep_nums[env_indices[:, None], obs_indices]
+        seq_mask = (ep_nums == ep_nums[:, :1])
+        seq_mask[:, :self.seq_prefix] = False
 
         # Return randomly selected experience tuples
         return to_tensor(obs, torch.float32), to_tensor(act, torch.float32), \
@@ -411,6 +406,7 @@ if __name__ == '__main__':
     parser.add_argument('--action_std_f', nargs='+', type=float, default=[-1])
 
     # CNN model arguments (shared by all CNN policies)
+    parser.add_argument('--action_rep', type=int, default=4)
     parser.add_argument('--in_channels', type=int, default=4)
     parser.add_argument('--out_channels', nargs='+', type=int, default=[32, 64, 64])
     parser.add_argument('--kernel_sizes', nargs='+', type=int, default=[8, 4, 3])
@@ -418,8 +414,8 @@ if __name__ == '__main__':
     parser.add_argument('--features_out', nargs='+', type=int, default=[512])
 
     # CNN-LSTM specific model arguments
-    parser.add_argument('--seq_len', type=int, default=40)
-    parser.add_argument('--seq_prefix', type=int, default=20)
+    parser.add_argument('--seq_len', type=int, default=32)
+    parser.add_argument('--seq_prefix', type=int, default=16)
     parser.add_argument('--seq_stride', type=int, default=10)
 
     # Rest of training arguments
@@ -478,8 +474,10 @@ if __name__ == '__main__':
         env_fn_def = lambda render_mode=None: gym.make(args.env, max_episode_steps=max_ep_len, 
                                                        render_mode=render_mode)
         env_fn = [lambda render_mode=None: FrameStackObservation(SkipAndScaleObservation(
-            GrayscaleObservation(env_fn_def(render_mode=render_mode))), stack_size=args.in_channels)] * args.cpu
+            GrayscaleObservation(env_fn_def(render_mode=render_mode)), skip=args.action_rep), 
+            stack_size=args.in_channels)] * args.cpu
         wrappers_kwargs = {
+            'SkipAndScaleObservation': {'skip': args.action_rep},
             'FrameStackObservation': {'stack_size': args.in_channels}
         }
     else:

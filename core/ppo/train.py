@@ -428,6 +428,7 @@ if __name__ == '__main__':
     parser.add_argument('--hid_cri', nargs='+', type=int, default=[64, 64])
 
     # CNN model arguments (shared by all CNN policies)
+    parser.add_argument('--action_rep', type=int, default=4)
     parser.add_argument('--in_channels', type=int, default=4)
     parser.add_argument('--out_channels', nargs='+', type=int, default=[32, 64, 64])
     parser.add_argument('--kernel_sizes', nargs='+', type=int, default=[8, 4, 3])
@@ -491,8 +492,10 @@ if __name__ == '__main__':
         env_fn_def = lambda render_mode=None: gym.make(args.env, max_episode_steps=max_ep_len, 
                                                        render_mode=render_mode)
         env_fn = [lambda render_mode=None: FrameStackObservation(SkipAndScaleObservation(
-            GrayscaleObservation(env_fn_def(render_mode=render_mode))), stack_size=args.in_channels)] * args.cpu
+            GrayscaleObservation(env_fn_def(render_mode=render_mode)), skip=args.action_rep), 
+            stack_size=args.in_channels)] * args.cpu
         wrappers_kwargs = {
+            'SkipAndScaleObservation': {'skip': args.action_rep},
             'FrameStackObservation': {'stack_size': args.in_channels}
         }
     else:
