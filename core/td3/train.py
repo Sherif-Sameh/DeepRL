@@ -450,8 +450,8 @@ if __name__ == '__main__':
     parser.add_argument('--features_out', nargs='+', type=int, default=[512])
 
     # CNN-LSTM specific model arguments
-    parser.add_argument('--seq_len', type=int, default=40)
-    parser.add_argument('--seq_prefix', type=int, default=20)
+    parser.add_argument('--seq_len', type=int, default=32)
+    parser.add_argument('--seq_prefix', type=int, default=16)
     parser.add_argument('--seq_stride', type=int, default=10)
 
     # Rest of training arguments

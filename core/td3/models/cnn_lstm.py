@@ -172,6 +172,7 @@ class CNNLSTMActor(nn.Module):
         self.feature_ext = feature_ext
         self.feature_ext_target = feature_ext_target
         self.action_max = action_max
+        self.act_dim = act_dim
 
         # Gather actor's independent layers
         layers = []
@@ -288,7 +289,7 @@ class CNNLSTMActorCritic(nn.Module):
     
     # Only for tracing the actor and critic's networks for tensorboard
     def forward(self, obs):
-        self.reset_hidden_states(torch.device('cpu'), batch_idx=obs.shape[0])
+        self.reset_hidden_states(torch.device('cpu'), batch_size=obs.shape[0])
         features = self.feature_ext(obs.unsqueeze(1))
         act = self.actor.forward(obs, features=features)
         q_val = self.critic_1.forward(obs, act, features=features)

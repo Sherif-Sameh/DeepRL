@@ -174,6 +174,7 @@ class CNNLSTMActor(nn.Module):
         self.feature_ext = feature_ext
         self.act_dim = act_dim
         self.action_max = action_max
+        self.act_dim = act_dim
 
         # Gather actor's independent layers
         layers = []
@@ -287,7 +288,7 @@ class CNNLSTMActorCritic(nn.Module):
     
     # Only for tracing the actor and critic's networks for tensorboard
     def forward(self, obs):
-        self.reset_hidden_states(torch.device('cpu'), batch_idx=obs.shape[0])
+        self.reset_hidden_states(torch.device('cpu'), batch_size=obs.shape[0])
         features = self.feature_ext(obs.unsqueeze(1))
         out = self.actor.actor_head(features.squeeze(1))
         act = out[..., :self.actor.act_dim]

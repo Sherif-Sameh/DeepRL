@@ -102,8 +102,8 @@ class SequenceReplayBuffer(ReplayBuffer):
         self.ep_nums = np.zeros((env.num_envs, self.env_buf_size), dtype=np.int64)
         self.ep_num_ctrs = np.zeros(env.num_envs, dtype=np.int64)
 
-    def update_buffer(self, env_id, obs, act, rew, q_val, done):
-        super().update_buffer(env_id, obs, act, rew, q_val, done)
+    def update_buffer(self, env_id, obs, act, logp, rew, q_val, done):
+        super().update_buffer(env_id, obs, act, logp, rew, q_val, done)
 
         # Increment episode counter if buffer wrapped around
         if (self.ctr[env_id] == 0) and (self.buf_full[env_id]):
@@ -485,8 +485,8 @@ if __name__ == '__main__':
     parser.add_argument('--features_out', nargs='+', type=int, default=[512])
 
     # CNN-LSTM specific model arguments
-    parser.add_argument('--seq_len', type=int, default=40)
-    parser.add_argument('--seq_prefix', type=int, default=20)
+    parser.add_argument('--seq_len', type=int, default=32)
+    parser.add_argument('--seq_prefix', type=int, default=16)
     parser.add_argument('--seq_stride', type=int, default=10)
 
     # Rest of training arguments
