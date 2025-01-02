@@ -187,7 +187,8 @@ class MLPActorCritic(nn.Module):
         return act.cpu().numpy()
     
     # Empty method used only by LSTM actor-critics
-    def reset_hidden_states(self, device, batch_size=1, batch_idx=None):
+    def reset_hidden_states(self, device, batch_size=1, batch_idx=None,
+                            save=False, restore=False):
         pass
     
     # Only for tracing the actor and critic's networks for tensorboard

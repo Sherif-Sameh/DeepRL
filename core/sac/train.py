@@ -409,9 +409,10 @@ class SACTrainer:
 
                 if (self.buf.get_buffer_size() >= self.learning_starts) \
                     and ((step % self.update_every) == 0):
+                    self.ac_mod.reset_hidden_states(self.device, save=True)
                     for _ in range(self.num_updates):
                         self.__update_params(epoch)
-                    self.ac_mod.reset_hidden_states(self.device, batch_size=self.env.num_envs)
+                    self.ac_mod.reset_hidden_states(self.device, restore=True)
             
             # Evaluate deterministic policy (skip return normalization wrapper)
             env = self.env.env if isinstance(self.env, NormalizeReward) else self.env 

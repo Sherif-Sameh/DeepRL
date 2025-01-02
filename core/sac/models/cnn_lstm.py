@@ -254,6 +254,9 @@ class CNNLSTMActorCritic(nn.Module):
         self.critic_2 = CNNLSTMCritic(self.feature_ext, self.feature_ext_target, 
                                       act_dim, hidden_sizes_critic)
         
+        # Initialize empty variable for storing hidden state during training
+        self.hidden_state_stored = None
+        
     def step(self, obs):
         with torch.no_grad():
             features = self.feature_ext(obs.unsqueeze(1))
@@ -278,8 +281,26 @@ class CNNLSTMActorCritic(nn.Module):
         return act.cpu().numpy()
     
     # Clears LSTM hidden states across a single or all batch indices
-    def reset_hidden_states(self, device, batch_size=1, batch_idx=None):
+    def reset_hidden_states(self, device, batch_size=1, batch_idx=None, 
+                            save=False, restore=False):
         if batch_idx is None:
+            if restore == True:
+                for i, (c0, h0, c0_target, h0_target) in enumerate(zip(*self.hidden_state_stored)):
+                    self.feature_ext.lstm_c[i] = c0.clone()
+                    self.feature_ext.lstm_h[i] = h0.clone()
+                    self.feature_ext_target.lstm_c[i] = c0_target.clone()
+                    self.feature_ext_target.lstm_h[i] = h0_target.clone()
+                return
+            if save == True:
+                self.hidden_state_stored = [[], [], [], []]
+                for c0, h0, c0_target, h0_target in zip(self.feature_ext.lstm_c, self.feature_ext.lstm_h,
+                                                        self.feature_ext_target.lstm_c, self.feature_ext_target.lstm_h):
+                    self.hidden_state_stored[0].append(c0.clone())
+                    self.hidden_state_stored[1].append(h0.clone())
+                    self.hidden_state_stored[2].append(c0_target.clone())
+                    self.hidden_state_stored[3].append(h0_target.clone())
+                return
+                
             self.feature_ext.reset_hidden_state_all(device, batch_size=batch_size)
             self.feature_ext_target.reset_hidden_state_all(device, batch_size=batch_size)
         else:
