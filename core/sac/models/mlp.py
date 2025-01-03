@@ -158,6 +158,7 @@ class MLPActorCritic(nn.Module):
         with torch.no_grad():
             out = self.actor.net(obs)
             act = out[..., :self.actor.act_dim] # Take the mean of the SAC policy
+            act = torch.tanh(act) * self.action_max
         
         return act.cpu().numpy()
     

@@ -225,6 +225,7 @@ class CNNActorCritic(nn.Module):
             else:
                 out = self.actor.actor_head(self.feature_ext(obs))
             act = out[..., :self.actor.act_dim] # Take the mean of the SAC policy
+            act = torch.tanh(act) * self.action_max 
         
         return act.cpu().numpy()
     

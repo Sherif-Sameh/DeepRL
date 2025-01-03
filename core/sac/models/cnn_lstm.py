@@ -277,6 +277,7 @@ class CNNLSTMActorCritic(nn.Module):
                 features = self.feature_ext(obs.unsqueeze(1)).squeeze(1)
             out = self.actor.actor_head(features)
             act = out[..., :self.actor.act_dim] # Take the mean of the SAC policy
+            act = torch.tanh(act) * self.action_max
         
         return act.cpu().numpy()
     
