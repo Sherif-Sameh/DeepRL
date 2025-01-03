@@ -414,7 +414,8 @@ class PPOTrainer:
         self.env.close()
         print(f'Model {epochs} (final) saved successfully')
 
-if __name__ == '__main__':
+
+def get_parser():
     import argparse
     parser = argparse.ArgumentParser()
     # Model and environment configuration
@@ -462,6 +463,12 @@ if __name__ == '__main__':
     parser.add_argument('--checkpoint_freq', type=int, default=25)
     parser.add_argument('--exp_name', type=str, default='ppo')
     parser.add_argument('--cpu', type=int, default=4)
+    
+    return parser
+
+if __name__ == '__main__':
+    # Parse input arguments
+    parser = get_parser()
     args = parser.parse_args()
 
     # Set directory for logging

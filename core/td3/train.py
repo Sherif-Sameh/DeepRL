@@ -98,6 +98,7 @@ class SequenceReplayBuffer(ReplayBuffer):
         self.ep_num_ctrs = np.zeros(env.num_envs, dtype=np.int64)
 
     def update_buffer(self, env_id, obs, act, rew, q_val, done):
+        self.ep_nums[env_id, self.ctr[env_id]] = self.ep_num_ctrs[env_id]
         super().update_buffer(env_id, obs, act, rew, q_val, done)
 
         # Increment episode counter if buffer wrapped around
@@ -317,9 +318,6 @@ class TD3Trainer:
         else:
             loss = 0.5 * (loss_q1 + loss_q2)
             loss.backward()
-            
-            # if self.clip_grad == True:
-            #     torch.nn.utils.clip_grad_norm_(self.ac_mod.parameters(), self.max_grad_norm)
             self.ac_optim.step()
         
         # Update target critic networks
@@ -427,7 +425,7 @@ class TD3Trainer:
         self.env.close()
         print(f'Model {epochs} (final) saved successfully')
 
-if __name__ == '__main__':
+def get_parser():
     import argparse
     parser = argparse.ArgumentParser()
     # Model and environment configuration
@@ -480,6 +478,12 @@ if __name__ == '__main__':
     parser.add_argument('--checkpoint_freq', type=int, default=25)
     parser.add_argument('--exp_name', type=str, default='td3')
     parser.add_argument('--cpu', type=int, default=4)
+
+    return parser
+
+if __name__ == '__main__':
+    # Parse input arguments
+    parser = get_parser()
     args = parser.parse_args()
 
     # Set directory for logging

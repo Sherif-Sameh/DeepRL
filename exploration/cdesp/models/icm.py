@@ -33,8 +33,8 @@ class InverseModel(nn.Module):
     
     def forward(self, features):
         # features shape (batch_size, seq_len, feature_dim)
-        features_curr = features[:, :-1, :].flatten(0, 1)
-        features_next = features[:, 1:, :].flatten(0, 1)
+        features_curr = features[:, :-1].flatten(0, 1)
+        features_next = features[:, 1:].flatten(0, 1)
 
         act_pred = self.net(torch.cat([features_curr, features_next], dim=-1))
         act_pred = act_pred.view(features.shape[0], features.shape[1]-1, self.act_dim)
@@ -75,12 +75,11 @@ class ForwardModel(nn.Module):
     def forward(self, features, act):
         # features shape (batch_size, seq_len, feature_dim)
         # act shape (batch_size, seq_len, act_dim)
-        features_curr = features[:, :-1, :].flatten(0, 1)
-        act_curr = act[:, :-1, :].flatten(0, 1)
+        features_curr = features.flatten(0, 1)
+        act_curr = act.flatten(0, 1)
 
         features_next_pred = self.net(torch.cat([features_curr, act_curr], dim=-1))
-        features_next_pred = features_next_pred.view(features.shape[0], features.shape[1]-1, 
-                                                     self.feature_dim)
+        features_next_pred = features_next_pred.view(*features.shape[:2], self.feature_dim)
         
         return features_next_pred
     
@@ -91,3 +90,34 @@ class ForwardModel(nn.Module):
             x = layer(x)
             print(layer.__class__.__name__, 'input & output shapes:\t', input_shape, x.shape)
         print('\n')
+
+"""Intrinsic Curiosity Module (ICM) that combines both the inverse and forward models. """
+class IntrinsicCuriosityModule(nn.Module):
+    def __init__(self, eta, feature_dim, act_dim, hidden_size_inv, hidden_sizes_fwd):
+        super().__init__()
+        self.eta_2 = eta/2
+
+        # Initialize the inverse and forward models
+        self.inv_mod = InverseModel(feature_dim, act_dim, hidden_size_inv)
+        self.fwd_mod = ForwardModel(feature_dim, act_dim, hidden_sizes_fwd)
+
+    def forward(self, features, act):
+        act_pred = self.inv_mod.forward(features)
+        features_next_pred = self.fwd_mod.forward(features, act)
+
+        return act_pred, features_next_pred
+    
+    def calc_reward(self, features, features_next, act):
+        with torch.no_grad():
+            features_next_pred = self.fwd_mod.forward(features, act)
+            # intrinsic reward = eta/2 * SSD of feature prediction error
+            intrinsic_rew = self.eta_2 * torch.sum((features_next_pred-features_next)**2, dim=-1)
+
+            return intrinsic_rew
+        
+    def layer_summary(self):
+        print('Inverse Model Summary: \n')
+        self.inv_mod.layer_summary()
+
+        print('Forward Model Summary: \n')
+        self.fwd_mod.layer_summary()

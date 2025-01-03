@@ -282,7 +282,7 @@ class CNNLSTMActorCritic(nn.Module):
         self.critic = CNNLSTMCritic(self.feature_ext)
     
     def step(self, obs):
-        features = self.feature_ext(obs.unsqueeze(1))
+        with torch.no_grad(): features = self.feature_ext(obs.unsqueeze(1))
         act = self.actor.forward(obs, features=features)
         val = self.critic.forward(obs, features=features)
         logp = self.actor.log_prob_no_grad(act)
