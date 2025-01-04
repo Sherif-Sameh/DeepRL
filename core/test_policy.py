@@ -4,6 +4,7 @@ import cv2
 from pathlib import Path
 from gymnasium.core import Env
 
+import numpy as np
 import torch
 import gymnasium as gym
 from gymnasium.wrappers import RescaleAction
@@ -71,6 +72,14 @@ if __name__ == '__main__':
         if args.use_gpu else torch.device('cpu')
     model.to(device)
     assert hasattr(model, 'act'), 'model must be implement an act(obs) method getting actions'
+
+    # Seed NumPy, PyTorch and GPU
+    np.random.seed(args.seed)
+    torch.manual_seed(args.seed)
+    if args.use_gpu == True:
+        torch.cuda.manual_seed(seed=args.seed)
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = True
 
     # Attempt to load saved environment or initialize new one if loading fails
     render_mode = 'rgb_array' if args.record==True else 'human'
