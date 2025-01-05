@@ -97,9 +97,15 @@ class MLPActor(MLP):
         self.net[-1].apply(lambda m: init_weights(m, gain=0.01))
     
     def forward(self, obs):
-        a, log_p = self.log_prob(obs)
+        # Input is assumed to be always 2D
+        out = self.net(obs)
+        mu, std = out[:, :self.act_dim], torch.exp(out[:, self.act_dim:])
         
-        return a, log_p
+        # Compute the actions 
+        u = mu + std * torch.randn_like(mu)
+        a = torch.tanh(u)
+        
+        return a * self.action_max
     
     def log_prob(self, obs):
         # Input is assumed to be always 2D
@@ -147,12 +153,12 @@ class MLPActorCritic(nn.Module):
         
     def step(self, obs):
         with torch.no_grad():
-            act, log_prob = self.actor.forward(obs)
+            act = self.actor.forward(obs)
             q_val_1 = self.critic_1.forward(obs, act)
             q_val_2 = self.critic_2.forward(obs, act)
             q_val = torch.min(q_val_1, q_val_2)
 
-        return act.cpu().numpy(), q_val.cpu().numpy().squeeze(), log_prob.cpu().numpy()
+        return act.cpu().numpy(), q_val.cpu().numpy().squeeze()
     
     def act(self, obs):
         with torch.no_grad():

@@ -169,8 +169,8 @@ class MLPActorCritic(nn.Module):
     def step(self, obs):
         with torch.no_grad():
             act = self.actor.forward(obs)
-            act = torch.max(torch.min(act + self.action_std * torch.randn_like(act), 
-                                      self.action_max), -self.action_max)
+            act = torch.clip(act + self.action_std * torch.randn_like(act), 
+                             min=-self.action_max, max=self.action_max)
             q_val = self.critic.forward(obs, act)
 
         return act.cpu().numpy(), q_val.cpu().numpy().squeeze()

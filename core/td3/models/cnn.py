@@ -214,8 +214,8 @@ class CNNActorCritic(nn.Module):
         with torch.no_grad():
             features = self.feature_ext(obs)
             act = self.actor.actor_head(features)
-            act = torch.max(torch.min(act + self.action_std * torch.randn_like(act),
-                                      self.action_max), -self.action_max)
+            act = torch.clip(act + self.action_std * torch.randn_like(act), 
+                             min=-self.action_max, max=self.action_max)
             q_val = self.critic_1.critic_head(torch.cat([features, act], dim=1))
         
         return act.cpu().numpy(), q_val.cpu().numpy().squeeze()

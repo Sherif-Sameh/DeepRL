@@ -4,7 +4,6 @@ from gymnasium.vector import AsyncVectorEnv
 from gymnasium.spaces import Box
 from gymnasium.wrappers import FrameStackObservation, GrayscaleObservation
 from gymnasium.wrappers.vector import RescaleAction, NormalizeReward
-import time
 import numpy as np
 import torch
 from torch import nn
@@ -34,17 +33,13 @@ class ReplayBuffer:
         # Initialize all buffers for storing data during training
         self.obs = np.zeros((env.num_envs, self.env_buf_size) + self.obs_shape, dtype=np.float32)
         self.act = np.zeros((env.num_envs, self.env_buf_size) + self.act_shape, dtype=np.float32)
-        self.logp = np.zeros((env.num_envs, self.env_buf_size), dtype=np.float32)
         self.rew = np.zeros((env.num_envs, self.env_buf_size), dtype=np.float32)
-        self.q_val = np.zeros((env.num_envs, self.env_buf_size), dtype=np.float32)
         self.done = np.zeros((env.num_envs, self.env_buf_size), dtype=np.bool)
 
-    def update_buffer(self, env_id, obs, act, logp, rew, q_val, done):
+    def update_buffer(self, env_id, obs, act, rew, done):
         self.obs[env_id, self.ctr[env_id]] = obs
         self.act[env_id, self.ctr[env_id]] = act
-        self.logp[env_id, self.ctr[env_id]] = logp
         self.rew[env_id, self.ctr[env_id]] = rew
-        self.q_val[env_id, self.ctr[env_id]] = q_val
         self.done[env_id, self.ctr[env_id]] = done
 
         # Update buffer counter and reset if neccessary
@@ -61,7 +56,6 @@ class ReplayBuffer:
         # Initialize empty batches for storing samples from the environments
         obs = np.zeros((self.batch_size,)+self.obs_shape, dtype=np.float32)
         act = np.zeros((self.batch_size,)+self.act_shape, dtype=np.float32)
-        logp = np.zeros((self.batch_size,), dtype=np.float32)
         rew = np.zeros(self.batch_size, dtype=np.float32)
         obs_next = np.zeros((self.batch_size,)+self.obs_shape, dtype=np.float32)
         done = np.zeros(self.batch_size, dtype=np.bool)
@@ -74,15 +68,14 @@ class ReplayBuffer:
 
             obs[env_slice] = self.obs[env_id, indices]
             act[env_slice] = self.act[env_id, indices]
-            logp[env_slice] = self.logp[env_id, indices]
             rew[env_slice] = self.rew[env_id, indices]
             obs_next[env_slice] = self.obs[env_id, indices+1]
             done[env_slice] = self.done[env_id, indices]
 
         # Return randomly selected experience tuples
         return to_tensor(obs, torch.float32), to_tensor(act, torch.float32), \
-                to_tensor(logp, torch.float32), to_tensor(rew, torch.float32), \
-                to_tensor(obs_next, torch.float32), to_tensor(done, torch.bool)
+                to_tensor(rew, torch.float32), to_tensor(obs_next, torch.float32), \
+                to_tensor(done, torch.bool)
     
     def get_buffer_size(self):
         return np.mean(np.where(self.buf_full, self.env_buf_size, self.ctr))
@@ -102,9 +95,9 @@ class SequenceReplayBuffer(ReplayBuffer):
         self.ep_nums = np.zeros((env.num_envs, self.env_buf_size), dtype=np.int64)
         self.ep_num_ctrs = np.zeros(env.num_envs, dtype=np.int64)
 
-    def update_buffer(self, env_id, obs, act, logp, rew, q_val, done):
+    def update_buffer(self, env_id, obs, act, rew, done):
         self.ep_nums[env_id, self.ctr[env_id]] = self.ep_num_ctrs[env_id]
-        super().update_buffer(env_id, obs, act, logp, rew, q_val, done)
+        super().update_buffer(env_id, obs, act, rew, done)
 
         # Increment episode counter if buffer wrapped around
         if (self.ctr[env_id] == 0) and (self.buf_full[env_id]):
@@ -138,7 +131,6 @@ class SequenceReplayBuffer(ReplayBuffer):
         # Sample sequences from replay buffer
         obs = self.obs[env_indices[:, None], obs_indices]
         act = self.act[env_indices[:, None], obs_indices]
-        logp = self.logp[env_indices[:, None], obs_indices]
         rew = self.rew[env_indices[:, None], obs_indices]
         obs_next = self.obs[env_indices[:, None], obs_next_indices]
         done = self.done[env_indices[:, None], obs_indices]
@@ -150,9 +142,8 @@ class SequenceReplayBuffer(ReplayBuffer):
 
         # Return randomly selected experience tuples
         return to_tensor(obs, torch.float32), to_tensor(act, torch.float32), \
-                to_tensor(logp, torch.float32), to_tensor(rew, torch.float32), \
-                to_tensor(obs_next, torch.float32), to_tensor(done, torch.bool), \
-                to_tensor(seq_mask, torch.bool)
+                to_tensor(rew, torch.float32), to_tensor(obs_next, torch.float32), \
+                to_tensor(done, torch.bool), to_tensor(seq_mask, torch.bool)
     
     def increment_ep_num(self, env_id):
         self.ep_num_ctrs[env_id] += 1
@@ -171,11 +162,11 @@ class SACTrainer:
     def __init__(self, env_fn, wrappers_kwargs=dict(), use_gpu=False, model_path='', 
                  ac=MLPActorCritic, ac_kwargs=dict(), seed=0, steps_per_epoch=1000, 
                  buf_size=1000000, gamma=0.99, polyak=0.995, lr=3e-4, lr_f=None, 
-                 max_grad_norm=0.5, clip_grad=False, alpha=0.2, alpha_min=3e-3, 
+                 max_grad_norm=0.5, clip_grad=False, alpha=0.2, alpha_min=0, 
                  entropy_target=None, auto_alpha=True, batch_size=100, 
-                 start_steps=10000, learning_starts=1000, update_every=50,
-                 num_updates=-1, num_test_episodes=10, seq_len=40, 
-                 seq_prefix=20, seq_stride=10, log_dir=None, save_freq=10, 
+                 start_steps=2500, learning_starts=1000, update_every=50,
+                 num_updates=-1, num_test_episodes=10, seq_len=32, 
+                 seq_prefix=16, seq_stride=10, log_dir=None, save_freq=10, 
                  checkpoint_freq=25):
         # Store needed hyperparameters
         self.seed = seed
@@ -253,7 +244,7 @@ class SACTrainer:
         # Initialize log alpha module based on training configuration
         if auto_alpha == True:
             alpha_init = alpha if alpha is not None else 1.0
-            self.entropy_target = -np.prod(self.env.action_space.shape, dtype=np.float32) \
+            self.entropy_target = -np.prod(self.env.single_action_space.shape, dtype=np.float32) \
                 if entropy_target is None else entropy_target
             self.alpha_mod = AlphaModule(alpha_init=alpha_init, requires_grad=True)
         else:
@@ -307,22 +298,22 @@ class SACTrainer:
         q_vals = torch.min(q_vals_1, q_vals_2)
         q_vals.squeeze_(dim=-1)
 
-        return (-q_vals[loss_mask] + alpha * log_prob[loss_mask]).mean()
+        return (-q_vals[loss_mask] + alpha * log_prob[loss_mask]).mean(), log_prob
 
-    def __calc_alpha_loss(self, logp: torch.Tensor):
-        alpha = self.alpha_mod.forward()
+    def __calc_alpha_loss(self, logp: torch.Tensor, loss_mask: torch.Tensor):
+        log_alpha = self.alpha_mod.log_alpha
         
-        return (alpha * (-logp - self.entropy_target)).mean()
+        return -(log_alpha * (logp[loss_mask].detach().cpu() + self.entropy_target)).mean()
     
     def __update_params(self, epoch):
         # Get mini-batch from replay buffer
         batch = self.buf.get_batch(self.device)
 
         # Unpack experience tuple
-        if len(batch) == 7:
-            obs, act, logp, rew, obs_next, done, mask = batch
+        if len(batch) == 6:
+            obs, act, rew, obs_next, done, mask = batch
         else:
-            obs, act, logp, rew, obs_next, done = batch
+            obs, act, rew, obs_next, done = batch
             mask = torch.full((obs.shape[0],), fill_value=True)
         
         alpha_det = self.alpha_mod.forward().detach().to(self.device)
@@ -335,7 +326,7 @@ class SACTrainer:
         # Get actor loss (critic's weights are frozen temporarily)
         self.ac_mod.critic_1.set_grad_tracking(val=False)
         self.ac_mod.critic_2.set_grad_tracking(val=False)
-        loss_pi = self.__calc_pi_loss(alpha_det, obs, mask)
+        loss_pi, logp = self.__calc_pi_loss(alpha_det, obs, mask)
         self.ac_mod.critic_1.set_grad_tracking(val=True)
         self.ac_mod.critic_2.set_grad_tracking(val=True)
         
@@ -351,11 +342,11 @@ class SACTrainer:
         # Update the log alpha parameter if its estimated online 
         if self.auto_alpha == True:
             self.alpha_optim.zero_grad()
-            loss_alpha = self.__calc_alpha_loss(logp.cpu())
+            loss_alpha = self.__calc_alpha_loss(logp, mask)
             loss_alpha.backward()
             self.alpha_optim.step()
-            with torch.no_grad(): 
-                self.alpha_mod.log_alpha.clamp_min_(torch.tensor(np.log(self.alpha_min)))
+            if self.alpha_min > 0:    
+                with torch.no_grad(): self.alpha_mod.log_alpha.clamp_min_(torch.tensor(np.log(self.alpha_min)))
             self.writer.add_scalar('Loss/LossAlpha', loss_alpha.item(), epoch+1)
 
         # Update target critic networks
@@ -381,7 +372,6 @@ class SACTrainer:
         
         # Initialize environment variables
         obs, _ = self.env.reset(seed=self.seed)
-        start_time = time.time()
         autoreset = np.zeros(self.env.num_envs)
         self.ac_mod.reset_hidden_states(self.device, batch_size=self.env.num_envs)
         q_vals = []
@@ -389,18 +379,18 @@ class SACTrainer:
         for epoch in range(epochs):
             for step in range(self.steps_per_epoch):
                 if (step + self.steps_per_epoch*epoch) > self.start_steps:
-                    act, q_val, logp = self.ac_mod.step(torch.as_tensor(obs, dtype=torch.float32, 
-                                                                        device=self.device))
+                    act, q_val = self.ac_mod.step(torch.as_tensor(obs, dtype=torch.float32, 
+                                                                  device=self.device))
                 else:
                     act = self.env.action_space.sample()
-                    _, q_val, logp = self.ac_mod.step(torch.as_tensor(obs, dtype=torch.float32, 
-                                                                      device=self.device))
+                    _, q_val = self.ac_mod.step(torch.as_tensor(obs, dtype=torch.float32, 
+                                                                device=self.device))
                 obs_next, rew, terminated, truncated, _ = self.env.step(act)
 
                 for env_id in range(self.env.num_envs):
                     if not autoreset[env_id]:
-                        self.buf.update_buffer(env_id, obs[env_id], act[env_id], logp[env_id], 
-                                               rew[env_id], q_val[env_id], terminated[env_id])
+                        self.buf.update_buffer(env_id, obs[env_id], act[env_id], 
+                                               rew[env_id], terminated[env_id])
                         q_vals.append(q_val[env_id])
                     else:
                         self.buf.increment_ep_num(env_id)
@@ -455,7 +445,6 @@ class SACTrainer:
             self.writer.add_scalar('QVals/max', q_vals.max(), epoch+1)
             self.writer.add_scalar('QVals/min', q_vals.min(), epoch+1)
             self.writer.add_scalar('Alpha', self.alpha_mod.forward().item(), epoch+1)
-            self.writer.add_scalar('Time', time.time()-start_time, epoch+1)
             self.writer.flush()
             q_vals = []
         
@@ -471,7 +460,7 @@ def get_parser():
     # Model and environment configuration
     parser.add_argument('--policy', type=str, default='mlp')
     parser.add_argument('--env', type=str, default='HalfCheetah-v5')
-    parser.add_argument('--use_gpu', type=bool, default=False)
+    parser.add_argument('--use_gpu', action="store_true", default=False)
     parser.add_argument('--model_path', type=str, default='')
 
     # Common model arguments 
@@ -501,10 +490,11 @@ def get_parser():
     parser.add_argument('--lr', type=float, default=3e-4)
     parser.add_argument('--lr_f', type=float, default=None)
     parser.add_argument('--max_grad_norm', type=float, default=0.5)
-    parser.add_argument('--clip_grad', type=bool, default=False)
+    parser.add_argument('--clip_grad', action="store_true", default=False)
     parser.add_argument('--alpha', type=float, default=0.2)
-    parser.add_argument('--alpha_min', type=float, default=3e-3)
-    parser.add_argument('--auto_alpha', type=bool, default=True)
+    parser.add_argument('--alpha_min', type=float, default=0)
+    parser.add_argument('--entropy_target', type=float, default=None)
+    parser.add_argument('--auto_alpha', action="store_true", default=False)
     parser.add_argument('--batch_size', type=int, default=100)
     parser.add_argument('--start_steps', type=int, default=2500)
     parser.add_argument('--learning_starts', type=int, default=1000)
@@ -567,7 +557,8 @@ if __name__ == '__main__':
                          seed=args.seed, steps_per_epoch=args.steps, buf_size=args.buf_size, 
                          gamma=args.gamma, polyak=args.polyak, lr=args.lr, lr_f=args.lr_f, 
                          max_grad_norm=args.max_grad_norm, clip_grad=args.clip_grad, 
-                         alpha=args.alpha, alpha_min=args.alpha_min, auto_alpha=args.auto_alpha, 
+                         alpha=args.alpha, alpha_min=args.alpha_min, 
+                         entropy_target=args.entropy_target, auto_alpha=args.auto_alpha, 
                          batch_size=args.batch_size, start_steps=args.start_steps, 
                          learning_starts=args.learning_starts, update_every=args.update_every, 
                          num_updates=args.num_updates, num_test_episodes=args.num_test_episodes, 

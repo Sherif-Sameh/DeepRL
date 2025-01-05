@@ -5,7 +5,6 @@ from gymnasium.spaces import Discrete, Box
 from gymnasium.wrappers import FrameStackObservation, GrayscaleObservation
 from gymnasium.wrappers.vector import RescaleAction
 from gymnasium.wrappers.utils import RunningMeanStd
-import time
 import numpy as np
 import torch
 from torch import nn
@@ -181,14 +180,15 @@ class PolicyOptimizer:
 
 class TRPOTrainer:
     def __init__(self, env_fn, wrappers_kwargs=dict(), use_gpu=False, model_path='', 
-                 ac=MLPActorCritic, ac_kwargs=dict(), seed=0, steps_per_epoch=1000, 
-                 gamma=0.99, delta=0.01, surr_obj_min=0.0, lr=1e-3, lr_f=None, 
-                 max_grad_norm=0.5, clip_grad=True, train_iters=80, damping_coeff=0.1, 
-                 cg_iters=10, backtrack_iters=10, backtrack_coeff=0.8, lam=0.95, 
-                 log_dir=None, save_freq=10, checkpoint_freq=25):
+                 ac=MLPActorCritic, ac_kwargs=dict(), seed=0, steps_per_epoch=1000,
+                 eval_every=4, gamma=0.99, delta=0.01, surr_obj_min=0.0, lr=1e-3, 
+                 lr_f=None, max_grad_norm=0.5, clip_grad=True, train_iters=80, 
+                 damping_coeff=0.1, cg_iters=10, backtrack_iters=10, backtrack_coeff=0.8, 
+                 lam=0.95, log_dir=None, save_freq=10, checkpoint_freq=25):
         # Store needed hyperparameters
         self.seed = seed
         self.steps_per_epoch = steps_per_epoch
+        self.eval_every = eval_every
         self.lr = lr
         self.lr_f = lr_f
         self.max_grad_norm = max_grad_norm
@@ -312,9 +312,8 @@ class TRPOTrainer:
 
         # Initialize environment variables
         obs, _ = self.env.reset(seed=self.seed)
-        ep_len, ep_ret = np.zeros(self.env.num_envs, dtype=np.int64), 0
+        ep_len, ep_ret = np.zeros(self.env.num_envs, dtype=np.int64), np.zeros(self.env.num_envs)
         ep_lens, ep_rets = [], []
-        start_time = time.time()
         autoreset = np.zeros(self.env.num_envs)
 
         for epoch in range(epochs):
@@ -322,32 +321,29 @@ class TRPOTrainer:
                 act, val, logp = self.ac_mod.step(torch.as_tensor(obs, dtype=torch.float32, 
                                                                   device=self.device))
                 obs_next, rew, terminated, truncated, _ = self.env.step(act)
+                autoreset_next = np.logical_or(terminated, truncated)
+                ep_len += 1
 
                 for env_id in range(self.env.num_envs):
                     if not autoreset[env_id]:
                         self.buf.update_buffer(env_id, obs[env_id], act[env_id], rew[env_id], 
                                                val[env_id], logp[env_id], step)
-                obs, ep_len = obs_next, ep_len + 1
-
-                epoch_done = step == (self.steps_per_epoch-1)
-                autoreset = np.logical_or(terminated, truncated)
-
-                if np.any(autoreset):
-                    for env_id in range(self.env.num_envs):
-                        if autoreset[env_id]:
-                            val_terminal = 0 if terminated[env_id] else self.ac_mod.get_terminal_value(
-                                torch.as_tensor(obs, dtype=torch.float32, device=self.device), env_id)
-                            ep_ret = self.buf.terminate_ep(env_id, ep_len[env_id], val_terminal)
-                            ep_lens.append(ep_len[env_id])
-                            ep_rets.append(ep_ret)
-                            ep_len[env_id] = 0
-                
-                if epoch_done:
-                    obs, _ = self.env.reset()
-                    self.buf.terminate_epoch()
-                    ep_len = np.zeros_like(ep_len)
-                    autoreset = np.zeros(self.env.num_envs)
+                    if autoreset_next[env_id]:
+                        val_terminal = 0 if terminated[env_id] else self.ac_mod.get_terminal_value(
+                            torch.as_tensor(obs_next, dtype=torch.float32, device=self.device), env_id)
+                        ep_ret[env_id] += self.buf.terminate_ep(env_id, min(ep_len[env_id], step+1), val_terminal)
+                        ep_lens.append(ep_len[env_id])
+                        ep_rets.append(ep_ret)
+                        ep_len[env_id], ep_ret[env_id] = 0, 0
+                obs, autoreset = obs_next, autoreset_next
             
+            for env_id in range(self.env.num_envs): 
+                if ep_len[env_id] > 0: 
+                    val_terminal = self.ac_mod.get_terminal_value(torch.as_tensor(obs, dtype=torch.float32, 
+                                                                                  device=self.device), env_id)
+                    ep_ret[env_id] += self.buf.terminate_ep(env_id, min(ep_len[env_id], self.steps_per_epoch), 
+                                                            val_terminal)
+            self.buf.terminate_epoch()
             self.__update_params(epoch)
             val_scheduler.step()
             
@@ -358,19 +354,19 @@ class TRPOTrainer:
     
             
             # Log info about epoch
-            if len(ep_rets) > 0:
-                total_steps_so_far = (epoch+1)*self.steps_per_epoch*self.env.num_envs
-                ep_lens, ep_rets = np.array(ep_lens), np.array(ep_rets)
-                self.writer.add_scalar('EpLen/mean', ep_lens.mean(), total_steps_so_far)
-                self.writer.add_scalar('EpRet/mean', ep_rets.mean(), total_steps_so_far)
-                self.writer.add_scalar('EpRet/max', ep_rets.max(), total_steps_so_far)
-                self.writer.add_scalar('EpRet/min', ep_rets.min(), total_steps_so_far)
-                ep_lens, ep_rets = [], []
-            self.writer.add_scalar('VVals/mean', self.buf.val.mean(), epoch+1)
-            self.writer.add_scalar('VVals/max', self.buf.val.max(), epoch+1)
-            self.writer.add_scalar('VVals/min', self.buf.val.min(), epoch+1)
-            self.writer.add_scalar('Time', time.time()-start_time, epoch+1)
-            self.writer.flush()
+            if ((epoch + 1) % self.eval_every) == 0:
+                if len(ep_rets) > 0:
+                    total_steps_so_far = (epoch+1)*self.steps_per_epoch*self.env.num_envs
+                    ep_lens, ep_rets = np.array(ep_lens), np.array(ep_rets)
+                    self.writer.add_scalar('EpLen/mean', ep_lens.mean(), total_steps_so_far)
+                    self.writer.add_scalar('EpRet/mean', ep_rets.mean(), total_steps_so_far)
+                    self.writer.add_scalar('EpRet/max', ep_rets.max(), total_steps_so_far)
+                    self.writer.add_scalar('EpRet/min', ep_rets.min(), total_steps_so_far)
+                    ep_lens, ep_rets = [], []
+                self.writer.add_scalar('VVals/mean', self.buf.val.mean(), epoch+1)
+                self.writer.add_scalar('VVals/max', self.buf.val.max(), epoch+1)
+                self.writer.add_scalar('VVals/min', self.buf.val.min(), epoch+1)
+                self.writer.flush()
         
         # Save final model
         torch.save(self.ac_mod, os.path.join(self.save_dir, 'model.pt'))
@@ -385,7 +381,7 @@ def get_parser():
     # Model and environment configuration
     parser.add_argument('--policy', type=str, default='mlp')
     parser.add_argument('--env', type=str, default='HalfCheetah-v5')
-    parser.add_argument('--use_gpu', type=bool, default=False)
+    parser.add_argument('--use_gpu', action="store_true", default=False)
     parser.add_argument('--model_path', type=str, default='')
 
     # MLP model arguments
@@ -404,6 +400,7 @@ def get_parser():
     # Rest of training arguments
     parser.add_argument('--seed', '-s', type=int, default=0)
     parser.add_argument('--steps', type=int, default=1000)
+    parser.add_argument('--eval_every', type=int, default=4)
     parser.add_argument('--epochs', type=int, default=100)
     parser.add_argument('--gamma', type=float, default=0.99)
     parser.add_argument('--delta', type=float, default=0.01)
@@ -411,7 +408,7 @@ def get_parser():
     parser.add_argument('--lr', type=float, default=1e-3)
     parser.add_argument('--lr_f', type=float, default=None)
     parser.add_argument('--max_grad_norm', type=float, default=0.5)
-    parser.add_argument('--clip_grad', type=bool, default=True)
+    parser.add_argument('--clip_grad', action="store_true", default=False)
     parser.add_argument('--train_iters', type=int, default=10)
     parser.add_argument('--damping_coeff', type=float, default=0.1)
     parser.add_argument('--cg_iters', type=int, default=10)
@@ -471,13 +468,13 @@ if __name__ == '__main__':
     # Begin training
     trainer = TRPOTrainer(env_fn, wrappers_kwargs=wrappers_kwargs, use_gpu=args.use_gpu, 
                           model_path=args.model_path, ac=ac, ac_kwargs=ac_kwargs, seed=args.seed, 
-                          steps_per_epoch=args.steps, gamma=args.gamma, delta=args.delta, 
-                          surr_obj_min=args.surr_obj_min, lr=args.lr, lr_f=args.lr_f, 
-                          max_grad_norm=args.max_grad_norm, clip_grad=args.clip_grad, 
-                          train_iters=args.train_iters, damping_coeff=args.damping_coeff, 
-                          cg_iters=args.cg_iters, backtrack_iters=args.backtrack_iters, 
-                          backtrack_coeff=args.backtrack_coeff, lam=args.lam, 
-                          log_dir=log_dir, save_freq=args.save_freq, 
+                          steps_per_epoch=args.steps, eval_every=args.eval_every, 
+                          gamma=args.gamma, delta=args.delta, surr_obj_min=args.surr_obj_min, 
+                          lr=args.lr, lr_f=args.lr_f, max_grad_norm=args.max_grad_norm, 
+                          clip_grad=args.clip_grad, train_iters=args.train_iters, 
+                          damping_coeff=args.damping_coeff, cg_iters=args.cg_iters, 
+                          backtrack_iters=args.backtrack_iters, backtrack_coeff=args.backtrack_coeff, 
+                          lam=args.lam, log_dir=log_dir, save_freq=args.save_freq, 
                           checkpoint_freq=args.checkpoint_freq)
     
     trainer.train_mod(args.epochs)

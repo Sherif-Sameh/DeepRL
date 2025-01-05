@@ -192,9 +192,17 @@ class CNNLSTMActor(nn.Module):
         self.actor_head[-1:].apply(lambda m: init_weights(m, gain=0.01))
     
     def forward(self, obs, features=None):
-        a, log_p = self.log_prob(obs, features=features)
+        # Input is assumed to be always 5D
+        if features is None: features = self.feature_ext(obs) 
+        out = self.actor_head(features.flatten(0, 1))
+        mu, std = out[:, :self.act_dim], torch.exp(out[:, self.act_dim:])
+        mu, std = mu.view(*features.shape[:2], self.act_dim), std.view(*features.shape[:2], self.act_dim)
+        
+        # Compute the actions 
+        u = mu + std * torch.randn_like(mu)
+        a = torch.tanh(u)
 
-        return a, log_p
+        return a * self.action_max
     
     def log_prob(self, obs, features=None):
         # Input is assumed to be always 5D
@@ -260,13 +268,12 @@ class CNNLSTMActorCritic(nn.Module):
     def step(self, obs):
         with torch.no_grad():
             features = self.feature_ext(obs.unsqueeze(1))
-            act, log_prob = self.actor.forward(obs, features=features)
+            act = self.actor.forward(obs, features=features)
             q_val_1 = self.critic_1.forward(obs, act, features=features)
             q_val_2 = self.critic_2.forward(obs, act, features=features)
             q_val = torch.min(q_val_1, q_val_2)
         
-        return act.squeeze(1).cpu().numpy(), q_val.cpu().numpy().squeeze(), \
-            log_prob.squeeze(1).cpu().numpy()
+        return act.squeeze(1).cpu().numpy(), q_val.cpu().numpy().squeeze()
 
     def act(self, obs):
         with torch.no_grad():

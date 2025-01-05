@@ -150,8 +150,11 @@ class MLPActorDiscrete(MLPActor):
         return self.pi.entropy()
             
 class MLPActorContinuous(MLPActor):
-    def __init__(self, obs_dim, act_dim, hidden_sizes, hidden_acts, log_std_init):
+    def __init__(self, obs_dim, act_dim, hidden_sizes, hidden_acts, 
+                 log_std_init, action_max):
         super().__init__(obs_dim, act_dim, hidden_sizes, hidden_acts)
+        self.action_max = nn.Parameter(torch.tensor(action_max, dtype=torch.float32), 
+                                       requires_grad=False)
         
         # Initialize policy log std
         if len(log_std_init) != act_dim:
@@ -166,7 +169,7 @@ class MLPActorContinuous(MLPActor):
         with torch.no_grad():
             mean = self.net(obs)
             self.pi = Normal(mean, torch.exp(self.log_std))
-            a = self.pi.sample()
+            a = torch.clip(self.pi.sample(), min=-self.action_max, max=self.action_max)
         
         return a
     
@@ -240,8 +243,9 @@ class MLPActorCritic(nn.Module):
                                           hidden_acts_actor)
         elif isinstance(env.single_action_space, Box):
             act_dim = env.single_action_space.shape[0]
+            action_max = env.single_action_space.high
             self.actor = MLPActorContinuous(obs_dim, act_dim, hidden_sizes_actor, 
-                                            hidden_acts_actor, log_std_init)
+                                            hidden_acts_actor, log_std_init, action_max)
         else:
             raise NotImplementedError
         
@@ -262,7 +266,8 @@ class MLPActorCritic(nn.Module):
         return self.critic(obs[batch_idx]).cpu().numpy()
     
     # Empty method used only by LSTM actor-critics
-    def reset_hidden_states(self, device, batch_size=1, batch_idx=None):
+    def reset_hidden_states(self, device, batch_size=1, batch_idx=None,
+                            save=False, restore=False):
         pass
     
     # Only for tracing the actor and critic's networks for tensorboard

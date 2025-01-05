@@ -4,7 +4,6 @@ from gymnasium.vector import AsyncVectorEnv
 from gymnasium.spaces import Discrete
 from gymnasium.wrappers import FrameStackObservation, GrayscaleObservation
 from gymnasium.wrappers.vector import NormalizeReward
-import time
 import numpy as np
 import torch
 from torch.optim import Adam
@@ -32,14 +31,12 @@ class ReplayBuffer:
         self.obs = np.zeros((env.num_envs, self.env_buf_size) + self.obs_shape, dtype=np.float32)
         self.act = np.zeros((env.num_envs, self.env_buf_size) + self.act_shape, dtype=np.int64)
         self.rew = np.zeros((env.num_envs, self.env_buf_size), dtype=np.float32)
-        self.q_val = np.zeros((env.num_envs, self.env_buf_size), dtype=np.float32)
         self.done = np.zeros((env.num_envs, self.env_buf_size), dtype=np.bool)
 
-    def update_buffer(self, env_id, obs, act, rew, q_val, done):
+    def update_buffer(self, env_id, obs, act, rew, done):
         self.obs[env_id, self.ctr[env_id]] = obs
         self.act[env_id, self.ctr[env_id]] = act
         self.rew[env_id, self.ctr[env_id]] = rew
-        self.q_val[env_id, self.ctr[env_id]] = q_val
         self.done[env_id, self.ctr[env_id]] = done
 
         # Update buffer counter and reset if neccessary
@@ -108,12 +105,11 @@ class PrioritizedReplayBuffer(ReplayBuffer):
         self.weights = np.ones((self.batch_size,), dtype=np.float32)
         self.indices = np.zeros((self.batch_size,), dtype=np.int64)
 
-    def update_buffer(self, env_id, obs, act, rew, q_val, done):
+    def update_buffer(self, env_id, obs, act, rew, done):
         # Normal replay buffer updates
         self.obs[env_id, self.ctr[env_id]] = obs
         self.act[env_id, self.ctr[env_id]] = act
         self.rew[env_id, self.ctr[env_id]] = rew
-        self.q_val[env_id, self.ctr[env_id]] = q_val
         self.done[env_id, self.ctr[env_id]] = done
 
         # Set priorities of new transitions to max priority
@@ -326,7 +322,6 @@ class DQNTrainer:
 
         # Initialize environment variables
         obs, _ = self.env.reset(seed=self.seed)
-        start_time = time.time()
         autoreset = np.zeros(self.env.num_envs)
         q_vals = []
 
@@ -338,8 +333,8 @@ class DQNTrainer:
 
                 for env_id in range(self.env.num_envs):
                     if not autoreset[env_id]:
-                        self.buf.update_buffer(env_id, obs[env_id], act[env_id], rew[env_id], 
-                                               q_val[env_id], terminated[env_id])
+                        self.buf.update_buffer(env_id, obs[env_id], act[env_id], 
+                                               rew[env_id], terminated[env_id])
                         q_vals.append(q_val[env_id])
                 obs = obs_next
                 autoreset = np.logical_or(terminated, truncated)
@@ -392,7 +387,6 @@ class DQNTrainer:
             self.writer.add_scalar('QVals/max', q_vals.max(), epoch+1)
             self.writer.add_scalar('QVals/min', q_vals.min(), epoch+1)
             self.writer.add_scalar('Epsilon', self.q_net_mod.eps, epoch+1)
-            self.writer.add_scalar('Time', time.time()-start_time, epoch+1)
             self.writer.flush()
             q_vals = []
         
@@ -408,13 +402,13 @@ def get_parser():
     # Model and environment configuration
     parser.add_argument('--policy', type=str, default='mlp')
     parser.add_argument('--env', type=str, default='CartPole-v1')
-    parser.add_argument('--use_gpu', type=bool, default=False)
+    parser.add_argument('--use_gpu', action="store_true", default=False)
     parser.add_argument('--model_path', type=str, default='')
 
     # Model generic arguments
-    parser.add_argument('--dueling', type=bool, default=False)
-    parser.add_argument('--double_q', type=bool, default=False)
-    parser.add_argument('--prioritized_replay', type=bool, default=False)
+    parser.add_argument('--dueling', action="store_true", default=False)
+    parser.add_argument('--double_q', action="store_true", default=False)
+    parser.add_argument('--prioritized_replay', action="store_true", default=False)
     parser.add_argument('--eps_init', type=float, default=1.0)
     parser.add_argument('--eps_final', type=float, default=0.05)
     parser.add_argument('--eps_decay_epochs', type=int, default=None)
@@ -446,7 +440,7 @@ def get_parser():
     parser.add_argument('--lr', type=float, default=5e-4)
     parser.add_argument('--lr_f', type=float, default=None)
     parser.add_argument('--max_grad_norm', type=float, default=0.5)
-    parser.add_argument('--clip_grad', type=bool, default=True)
+    parser.add_argument('--clip_grad', action="store_true", default=False)
     parser.add_argument('--save_freq', type=int, default=10)
     parser.add_argument('--checkpoint_freq', type=int, default=25)
     parser.add_argument('--exp_name', type=str, default='dqn')

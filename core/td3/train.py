@@ -4,7 +4,6 @@ from gymnasium.vector import AsyncVectorEnv
 from gymnasium.spaces import Box
 from gymnasium.wrappers import FrameStackObservation, GrayscaleObservation
 from gymnasium.wrappers.vector import RescaleAction, NormalizeReward
-import time
 import numpy as np
 import torch
 import torch.nn.functional as F
@@ -34,14 +33,12 @@ class ReplayBuffer:
         self.obs = np.zeros((env.num_envs, self.env_buf_size) + self.obs_shape, dtype=np.float32)
         self.act = np.zeros((env.num_envs, self.env_buf_size) + self.act_shape, dtype=np.float32)
         self.rew = np.zeros((env.num_envs, self.env_buf_size), dtype=np.float32)
-        self.q_val = np.zeros((env.num_envs, self.env_buf_size), dtype=np.float32)
         self.done = np.zeros((env.num_envs, self.env_buf_size), dtype=np.bool)
 
-    def update_buffer(self, env_id, obs, act, rew, q_val, done):
+    def update_buffer(self, env_id, obs, act, rew, done):
         self.obs[env_id, self.ctr[env_id]] = obs
         self.act[env_id, self.ctr[env_id]] = act
         self.rew[env_id, self.ctr[env_id]] = rew
-        self.q_val[env_id, self.ctr[env_id]] = q_val
         self.done[env_id, self.ctr[env_id]] = done
 
         # Update buffer counter and reset if neccessary
@@ -97,9 +94,9 @@ class SequenceReplayBuffer(ReplayBuffer):
         self.ep_nums = np.zeros((env.num_envs, self.env_buf_size), dtype=np.int64)
         self.ep_num_ctrs = np.zeros(env.num_envs, dtype=np.int64)
 
-    def update_buffer(self, env_id, obs, act, rew, q_val, done):
+    def update_buffer(self, env_id, obs, act, rew, done):
         self.ep_nums[env_id, self.ctr[env_id]] = self.ep_num_ctrs[env_id]
-        super().update_buffer(env_id, obs, act, rew, q_val, done)
+        super().update_buffer(env_id, obs, act, rew, done)
 
         # Increment episode counter if buffer wrapped around
         if (self.ctr[env_id] == 0) and (self.buf_full[env_id]):
@@ -341,7 +338,6 @@ class TD3Trainer:
             
         # Initialize environment variables
         obs, _ = self.env.reset(seed=self.seed)
-        start_time = time.time()
         autoreset = np.zeros(self.env.num_envs)
         self.ac_mod.reset_hidden_states(self.device, batch_size=self.env.num_envs)
         q_vals = []
@@ -359,8 +355,8 @@ class TD3Trainer:
 
                 for env_id in range(self.env.num_envs):
                     if not autoreset[env_id]:
-                        self.buf.update_buffer(env_id, obs[env_id], act[env_id], rew[env_id], 
-                                               q_val[env_id], terminated[env_id])
+                        self.buf.update_buffer(env_id, obs[env_id], act[env_id], 
+                                               rew[env_id], terminated[env_id])
                         q_vals.append(q_val[env_id])
                     else:
                         self.buf.increment_ep_num(env_id)
@@ -415,7 +411,6 @@ class TD3Trainer:
             self.writer.add_scalar('QVals/mean', q_vals.mean(), epoch+1)
             self.writer.add_scalar('QVals/max', q_vals.max(), epoch+1)
             self.writer.add_scalar('QVals/min', q_vals.min(), epoch+1)
-            self.writer.add_scalar('Time', time.time()-start_time, epoch+1)
             self.writer.flush()
             q_vals = []
         
@@ -431,7 +426,7 @@ def get_parser():
     # Model and environment configuration
     parser.add_argument('--policy', type=str, default='mlp')
     parser.add_argument('--env', type=str, default='HalfCheetah-v5')
-    parser.add_argument('--use_gpu', type=bool, default=False)
+    parser.add_argument('--use_gpu', action="store_true", default=False)
     parser.add_argument('--model_path', type=str, default='')
     
     # Common model arguments 
@@ -463,7 +458,7 @@ def get_parser():
     parser.add_argument('--lr', type=float, default=1e-3)
     parser.add_argument('--lr_f', type=float, default=None)
     parser.add_argument('--max_grad_norm', type=float, default=0.5)
-    parser.add_argument('--clip_grad', type=bool, default=False)
+    parser.add_argument('--clip_grad', action="store_true", default=False)
     parser.add_argument('--batch_size', type=int, default=100)
     parser.add_argument('--start_steps', type=int, default=2500)
     parser.add_argument('--learning_starts', type=int, default=1000)

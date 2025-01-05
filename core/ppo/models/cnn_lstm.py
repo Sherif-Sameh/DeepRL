@@ -163,8 +163,11 @@ class CNNLSTMActorDiscrete(CNNLSTMActor):
         return self.pi.entropy()
     
 class CNNLSTMActorContinuous(CNNLSTMActor):
-    def __init__(self, feature_ext: FeatureExtractor, act_dim, log_std_init):
+    def __init__(self, feature_ext: FeatureExtractor, act_dim, 
+                 log_std_init, action_max):
         super().__init__(feature_ext, act_dim)
+        self.action_max = nn.Parameter(torch.tensor(action_max, dtype=torch.float32), 
+                                       requires_grad=False)
 
         # Initialize policy log std
         if len(log_std_init) != act_dim:
@@ -181,7 +184,7 @@ class CNNLSTMActorContinuous(CNNLSTMActor):
             mean = self.actor_head(features.flatten(0, 1))
             self.pi = Normal(mean.view(*features.shape[:2], self.act_dim), 
                              torch.exp(self.log_std))
-            a = self.pi.sample()
+            a = torch.clip(self.pi.sample(), min=-self.action_max, max=self.action_max)
 
         return a
     
@@ -274,12 +277,17 @@ class CNNLSTMActorCritic(nn.Module):
             self.actor = CNNLSTMActorDiscrete(self.feature_ext, act_dim)
         elif isinstance(env.single_action_space, Box):
             act_dim = env.single_action_space.shape[0]
-            self.actor = CNNLSTMActorContinuous(self.feature_ext, act_dim, log_std_init)
+            action_max = env.single_action_space.high
+            self.actor = CNNLSTMActorContinuous(self.feature_ext, act_dim, 
+                                                log_std_init, action_max)
         else:
             raise NotImplementedError
         
         # Initialize critic
         self.critic = CNNLSTMCritic(self.feature_ext)
+
+        # Initialize empty variable for storing hidden state during training
+        self.hidden_state_stored = None
     
     def step(self, obs):
         with torch.no_grad(): features = self.feature_ext(obs.unsqueeze(1))
@@ -306,8 +314,22 @@ class CNNLSTMActorCritic(nn.Module):
         return val.cpu().numpy()
     
     # Clears LSTM hidden states across a single or all batch indices
-    def reset_hidden_states(self, device, batch_size=1, batch_idx=None):
+    def reset_hidden_states(self, device, batch_size=1, batch_idx=None,
+                            save=False, restore=False):
         if batch_idx is None:
+            if batch_idx is None:
+                if restore == True:
+                    for i, (c0, h0) in enumerate(zip(*self.hidden_state_stored)):
+                        self.feature_ext.lstm_c[i] = c0.clone()
+                        self.feature_ext.lstm_h[i] = h0.clone()
+                    return
+                if save == True:
+                    self.hidden_state_stored = [[], [], [], []]
+                    for c0, h0 in zip(self.feature_ext.lstm_c, self.feature_ext.lstm_h):
+                        self.hidden_state_stored[0].append(c0.clone())
+                        self.hidden_state_stored[1].append(h0.clone())
+                    return
+            
             self.feature_ext.reset_hidden_state_all(device, batch_size=batch_size)
         else:
             self.feature_ext.reset_hidden_state(device, batch_idx=batch_idx)

@@ -138,8 +138,11 @@ class CNNActorDiscrete(CNNActor):
         return self.pi.entropy()
     
 class CNNActorContinuous(CNNActor):
-    def __init__(self, feature_ext: FeatureExtractor, act_dim, log_std_init):
+    def __init__(self, feature_ext: FeatureExtractor, act_dim, 
+                 log_std_init, action_max):
         super().__init__(feature_ext, act_dim)
+        self.action_max = nn.Parameter(torch.tensor(action_max, dtype=torch.float32), 
+                                       requires_grad=False)
 
         # Initialize policy log std
         if len(log_std_init) != act_dim:
@@ -154,8 +157,8 @@ class CNNActorContinuous(CNNActor):
         with torch.no_grad():
             mean = self.actor_head(self.feature_ext(obs))
             self.pi = Normal(mean, torch.exp(self.log_std))
-            a = self.pi.sample()
-        
+            a = torch.clip(self.pi.sample(), min=-self.action_max, max=self.action_max)
+
         return a
 
     def log_prob_no_grad(self, act):
@@ -213,7 +216,9 @@ class CNNActorCritic(nn.Module):
             self.actor = CNNActorDiscrete(self.feature_ext, act_dim)
         elif isinstance(env.single_action_space, Box):
             act_dim = env.single_action_space.shape[0]
-            self.actor = CNNActorContinuous(self.feature_ext, act_dim, log_std_init)
+            action_max = env.single_action_space.high
+            self.actor = CNNActorContinuous(self.feature_ext, act_dim, 
+                                            log_std_init, action_max)
         else:
             raise NotImplementedError
         
