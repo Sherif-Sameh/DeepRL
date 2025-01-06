@@ -3,7 +3,7 @@ import gymnasium as gym
 from gymnasium.vector import AsyncVectorEnv
 from gymnasium.spaces import Discrete, Box
 from gymnasium.wrappers import FrameStackObservation, GrayscaleObservation
-from gymnasium.wrappers.vector import RescaleAction
+from gymnasium.wrappers.vector import RescaleAction, ClipAction
 from gymnasium.wrappers.utils import RunningMeanStd
 import numpy as np
 import torch
@@ -212,6 +212,7 @@ class PPOTrainer:
         self.env = AsyncVectorEnv(env_fn)
         self.env = RescaleAction(self.env, min_action=-1.0, max_action=1.0) \
             if isinstance(self.env.single_action_space, Box) else self.env # Rescale cont. action spaces to [-1, 1]
+        self.env = ClipAction(self.env)
         try:
             save_env(env_fn[0], wrappers_kwargs, self.writer.get_logdir(), render_mode='human')
             save_env(env_fn[0], wrappers_kwargs, self.writer.get_logdir(), render_mode='rgb_array')
@@ -266,7 +267,7 @@ class PPOTrainer:
         return surrogate_obj
     
     def __calc_entropy_loss(self, loss_mask: torch.Tensor):
-        entropy = self.ac_mod.actor.entropy_grad()
+        entropy = self.ac_mod.actor.entropy()
         entropy_loss = -(entropy[loss_mask].mean())
         
         return entropy_loss
@@ -274,7 +275,7 @@ class PPOTrainer:
     
     def __calc_val_loss(self, obs: torch.Tensor, rtg: torch.Tensor,
                         loss_mask: torch.Tensor):
-        val = self.ac_mod.critic.forward_grad(obs)
+        val = self.ac_mod.critic.forward(obs)
         val_loss = F.mse_loss(val[loss_mask], rtg[loss_mask])
         
         return val_loss 
@@ -283,11 +284,11 @@ class PPOTrainer:
         # Store old policy and all observations for KL early stopping
         obs_all = self.buf.get_all_obs(self.device) # Returns a tuple (obs, mask) for LSTM policies
         self.ac_mod.reset_hidden_states(self.device, batch_size=self.env.num_envs)
-        self.ac_mod.actor.update_policy(obs_all[0] if isinstance(obs_all, tuple) else obs_all)
+        with torch.no_grad(): self.ac_mod.actor.forward(obs_all[0] if isinstance(obs_all, tuple) else obs_all)
         pi_curr = self.ac_mod.actor.copy_policy()
 
         # Loop train_iters times over the whole dataset (unless early stopping occurs)
-        kl_divs = []
+        kls = []
         for i in range(self.train_iters):
             # Get dataloader for performing mini-batch SGD updates
             dataloader = self.buf.get_dataloader(self.device)
@@ -326,8 +327,8 @@ class PPOTrainer:
 
             # Check KL-Divergence constraint for triggering early stopping
             self.ac_mod.reset_hidden_states(self.device, batch_size=self.env.num_envs)
-            kl = self.ac_mod.actor.kl_divergence(obs_all, pi_curr)
-            kl_divs.append(kl.item())
+            with torch.no_grad(): kl = self.ac_mod.actor.kl_divergence(obs_all, pi_curr)
+            kls.append(kl.item())
             if (self.target_kl is not None) and (kl > 1.5 * self.target_kl):
                 # print(f'Actor updates cut-off after {i+1} iterations by KL {kl}')
                 break
@@ -336,7 +337,7 @@ class PPOTrainer:
         self.writer.add_scalar('Loss/LossPi', loss_pi.item(), epoch+1)
         self.writer.add_scalar('Loss/LossEnt', loss_ent.item(), epoch+1)
         self.writer.add_scalar('Loss/LossV', loss_val.item(), epoch+1)
-        self.writer.add_scalar('Pi/KL', np.mean(kl_divs), epoch+1)
+        self.writer.add_scalar('Pi/KL', np.mean(kls), epoch+1)
 
     
     def train_mod(self, epochs=100):

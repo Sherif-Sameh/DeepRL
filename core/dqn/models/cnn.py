@@ -147,7 +147,7 @@ class CNNDQN(nn.Module):
 
         return act.cpu().numpy(), q_val.cpu().numpy()  
 
-    def act(self, obs):
+    def act(self, obs, deterministic=False):
         with torch.no_grad():
             # Make sure that obs always has a batch dimension
             if obs.ndim == 3:

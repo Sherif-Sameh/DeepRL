@@ -175,7 +175,7 @@ class MLPActorCritic(nn.Module):
 
         return act.cpu().numpy(), q_val.cpu().numpy().squeeze()
     
-    def act(self, obs):
+    def act(self, obs, deterministic=False):
         with torch.no_grad():
             act = self.actor.forward(obs)
         

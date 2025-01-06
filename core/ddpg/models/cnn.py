@@ -217,7 +217,7 @@ class CNNActorCritic(nn.Module):
 
         return act.cpu().numpy(), q_val.cpu().numpy().squeeze()
 
-    def act(self, obs):
+    def act(self, obs, deterministic=False):
         with torch.no_grad():
             if obs.ndim == 3:
                 act = self.actor.forward(obs[None]).squeeze(dim=0)

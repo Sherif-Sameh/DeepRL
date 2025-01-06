@@ -76,16 +76,10 @@ class CNNActor(nn.Module):
         self.actor_head.apply(lambda m: init_weights(m, gain=0.01))
 
     @abc.abstractmethod
-    def forward(self, obs):
+    def forward(self, obs, deterministic=False):
         """Updates the actor's policy using given observations, then samples 
-        and returns actions from the updated polciy. Always evaluates the 
-        network under torch.no_grad(). """
-        pass
-    
-    @abc.abstractmethod
-    def update_policy(self, obs):
-        """Updates the actor's policy using the given observations. Always,
-        evaluates the network under torch.no_grad(). """
+        and returns actions from the updated polciy. If deterministic is set
+        to True, the greedy action is returned. """
         pass
 
     @abc.abstractmethod
@@ -112,23 +106,14 @@ class CNNActor(nn.Module):
     def surrogate_obj(self, obs, act, adv, log_prob_prev):
         """Evaluates and returns TRPO's surrogate objective function by
         updating the policy and comparing the log probabilites of the given 
-        actions to those previously computed. All steps are executed under
-        torch.no_grad(). Typically called after parameter update to evaluate 
-        new policy. """
+        actions to those previously computed. Typically called after parameter 
+        update to evaluate new policy. """
         pass
 
     @abc.abstractmethod
-    def kl_divergence_grad(self):
-        """Evaluates and returns the KL-Divergence of the policy. Policy is
-        evaluated with respect to a detached copy of itself, as the method is 
-        only used for gradient calculation. """
-        pass
-    
-    @abc.abstractmethod
-    def kl_divergence_no_grad(self, pi_prev):
-        """Evaluates and returns the KL-Divergence of the current policy 
-        with respect to the given old policy. All steps are executed under
-        torch.no_grad(). """
+    def kl_divergence(self, pi_prev=None):
+        """Evaluates and returns the KL-Divergence of the policy. If no policy
+        is passed then policy is evaluated with respect to a detached copy of itself. """
         pass
 
     def layer_summary(self):
@@ -143,18 +128,15 @@ class CNNActorDiscrete(CNNActor):
         # Initialize the policy randomly
         self.pi = Categorical(logits=torch.randn(act_dim, dtype=torch.float32))
 
-    def forward(self, obs):
-        with torch.no_grad():
-            logits = self.actor_head(self.feature_ext(obs))
-            self.pi = Categorical(logits=logits)
+    def forward(self, obs, deterministic=False):
+        logits = self.actor_head(self.feature_ext(obs))
+        self.pi = Categorical(logits=logits)
+        if deterministic:
+            a = torch.argmax(logits, dim=-1)
+        else:
             a = self.pi.sample()
         
         return a
-
-    def update_policy(self, obs):
-        with torch.no_grad():
-            logits = self.actor_head(self.feature_ext(obs))
-            self.pi = Categorical(logits=logits)
     
     def copy_policy(self):
         return Categorical(logits=self.pi.logits)
@@ -172,32 +154,22 @@ class CNNActorDiscrete(CNNActor):
         return self.pi.log_prob(act)
     
     def surrogate_obj(self, obs, act, adv, log_prob_prev):
-        self.update_policy(obs) # update policy after parameter update
-        log_prob = self.log_prob_no_grad(act)
+        log_prob = self.log_prob_grad(obs, act)
         loss_pi = torch.mean(torch.exp(log_prob - log_prob_prev) * adv)
         
         return loss_pi
     
-    def kl_divergence_grad(self):
+    def kl_divergence(self, pi_prev=None):
         # Note: self.pi should've been already updated by log_prob_grad()
-        with torch.no_grad():
+        if pi_prev is None:
             logits = self.pi.logits.detach()
-            pi = Categorical(logits=logits)
+            pi_prev = Categorical(logits=logits)
         
-        return torch.distributions.kl_divergence(pi, self.pi).mean()
-    
-    def kl_divergence_no_grad(self, pi_prev):
-        with torch.no_grad():
-            kl = torch.distributions.kl.kl_divergence(pi_prev, self.pi)
-        
-        return kl.mean()
+        return torch.distributions.kl_divergence(pi_prev, self.pi).mean()
     
 class CNNActorContinuous(CNNActor):
-    def __init__(self, feature_ext: FeatureExtractor, act_dim, 
-                 log_std_init, action_max):
+    def __init__(self, feature_ext: FeatureExtractor, act_dim, log_std_init):
         super().__init__(feature_ext, act_dim)
-        self.action_max = nn.Parameter(torch.tensor(action_max, dtype=torch.float32), 
-                                       requires_grad=False)
 
         # Initialize policy log std
         if len(log_std_init) != act_dim:
@@ -208,18 +180,15 @@ class CNNActorContinuous(CNNActor):
         # Initialize the policy randomly
         self.pi = Normal(loc=torch.randn(act_dim), scale=torch.exp(self.log_std))
 
-    def forward(self, obs):
-        with torch.no_grad():
-            mean = self.actor_head(self.feature_ext(obs))
-            self.pi = Normal(mean, torch.exp(self.log_std))
-            a = torch.clip(self.pi.sample(), min=-self.action_max, max=self.action_max)
+    def forward(self, obs, deterministic=False):
+        mean = self.actor_head(self.feature_ext(obs))
+        self.pi = Normal(mean, torch.exp(self.log_std))
+        if deterministic:
+            a = mean
+        else:
+            a = self.pi.sample()
         
         return a
-
-    def update_policy(self, obs):
-        with torch.no_grad():
-            mean = self.actor_head(self.feature_ext(obs))
-            self.pi = Normal(mean, torch.exp(self.log_std))
 
     def copy_policy(self):
         return Normal(loc=self.pi.mean, scale=self.pi.stddev)
@@ -237,44 +206,18 @@ class CNNActorContinuous(CNNActor):
         return self.pi.log_prob(act).sum(axis=-1)
     
     def surrogate_obj(self, obs, act, adv, log_prob_prev):
-        self.update_policy(obs) # update policy after parameter update
-        log_prob = self.log_prob_no_grad(act)
+        log_prob = self.log_prob_grad(obs, act)
         loss_pi = torch.mean(torch.exp(log_prob - log_prob_prev) * adv)
         
         return loss_pi
     
-    def kl_divergence_grad(self):
+    def kl_divergence(self, pi_prev=None):
         # Note: self.pi should've been already updated by log_prob_grad()
-        mu1, log_std1 = self.pi.mean, self.log_std
-        var1 = torch.exp(2 * log_std1)
-        with torch.no_grad():
+        if pi_prev is None:
             mu0, log_std0 = self.pi.mean.detach(), self.log_std.data
-            var0 = torch.exp(2 * log_std0)
+            pi_prev = Normal(mu0, torch.exp(log_std0))
 
-        # Compute the element-wise KL divergence
-        pre_sum = 0.5 * (((mu0 - mu1) ** 2 + var0) / (var1 + 1e-8) - 1) + log_std1 - log_std0
-        
-        # Sum over the dimensions of the distribution
-        all_kls = torch.sum(pre_sum, dim=1)
-        
-        # Return the mean KL divergence over the batch
-        return torch.mean(all_kls)
-    
-    def kl_divergence_no_grad(self, pi_prev):
-        mu1, log_std1 = self.pi.mean.detach(), self.log_std.data
-        var1 = torch.exp(2 * log_std1)
-        with torch.no_grad():
-            mu0, var0 = pi_prev.mean.detach(), pi_prev.variance.detach()
-            log_std0 = torch.log(pi_prev.stddev)
-        
-        # Compute the element-wise KL divergence
-        pre_sum = 0.5 * (((mu0 - mu1) ** 2 + var0) / (var1 + 1e-8) - 1) + log_std1 - log_std0
-        
-        # Sum over the dimensions of the distribution
-        all_kls = torch.sum(pre_sum, dim=1)
-        
-        # Return the mean KL divergence over the batch
-        return torch.mean(all_kls)
+        return torch.distributions.kl_divergence(pi_prev, self.pi).mean()
     
 class CNNCritic(nn.Module):
     def __init__(self, feature_ext: FeatureExtractor):
@@ -288,14 +231,10 @@ class CNNCritic(nn.Module):
         self.critic_head.apply(lambda m: init_weights(m, gain=1))
         
     def forward(self, obs):
-        with torch.no_grad():
-            v = torch.squeeze(self.critic_head(self.feature_ext(obs)))
+        v = torch.squeeze(self.critic_head(self.feature_ext(obs)))
         
         return v
     
-    def forward_grad(self, obs):
-        return torch.squeeze(self.critic_head(self.feature_ext(obs)))
-
     def layer_summary(self):
         print(self.critic_head[0].__class__.__name__, 'input & output shapes:\t', 
               f'(1, {self.feature_ext.features_out})', '(1, 1)\n')
@@ -316,9 +255,8 @@ class CNNActorCritic(nn.Module):
             self.actor = CNNActorDiscrete(feature_ext_actor, act_dim)
         elif isinstance(env.single_action_space, Box):
             act_dim = env.single_action_space.shape[0]
-            action_max = env.single_action_space.high
             self.actor = CNNActorContinuous(feature_ext_actor, act_dim, 
-                                            log_std_init, action_max)
+                                            log_std_init)
         else:
             raise NotImplementedError
         
@@ -329,21 +267,29 @@ class CNNActorCritic(nn.Module):
         self.critic = CNNCritic(feature_ext_critic)
     
     def step(self, obs):
-        act = self.actor(obs)
-        logp = self.actor.log_prob_no_grad(act)
-        val = self.critic(obs)
+        with torch.no_grad():
+            act = self.actor.forward(obs)
+            val = self.critic.forward(obs)
+            logp = self.actor.log_prob_no_grad(act)
 
         return act.cpu().numpy(), val.cpu().numpy(), logp.cpu().numpy()
     
-    def act(self, obs):
-        # Make sure that obs always has a batch dimension
-        if obs.ndim == 3:
-            return self.actor(obs[None]).squeeze(dim=0).cpu().numpy()
+    def act(self, obs, deterministic=False):
+        with torch.no_grad():
+            # Make sure that obs always has a batch dimension
+            if obs.ndim == 3:
+                act = self.actor.forward(obs.unsqueeze(0),
+                                         deterministic=deterministic).squeeze(0)
+            else:
+                act = self.actor.forward(obs, deterministic=deterministic)
         
-        return self.actor(obs).cpu().numpy()
+        return act.cpu().numpy()
     
     def get_terminal_value(self, obs, batch_idx):
-        return self.critic(obs[batch_idx].unsqueeze(0)).cpu().numpy()
+        with torch.no_grad():
+            val_term = self.critic.forward(obs[batch_idx].unsqueeze(0))
+        
+        return val_term.cpu().numpy()
 
     # Only for tracing the actor and critic's networks for tensorboard
     def forward(self, obs):

@@ -147,13 +147,16 @@ class CNNActor(nn.Module):
         self.actor_head.apply(lambda m: init_weights(m, gain=1.0))
         self.actor_head[-1:].apply(lambda m: init_weights(m, gain=0.01))
     
-    def forward(self, obs):
+    def forward(self, obs, deterministic=False):
         # Input is assumed to be always 4D
         out = self.actor_head(self.feature_ext(obs))
         mu, std = out[:, :self.act_dim], torch.exp(out[:, self.act_dim:])
         
         # Compute the actions 
-        u = mu + std * torch.randn_like(mu)
+        if deterministic:
+            u = mu
+        else:
+            u = mu + std * torch.randn_like(mu)
         a = torch.tanh(u)
 
         return a * self.action_max
@@ -224,14 +227,13 @@ class CNNActorCritic(nn.Module):
         
         return act.cpu().numpy(), q_val.cpu().numpy().squeeze()
 
-    def act(self, obs):
+    def act(self, obs, deterministic=False):
         with torch.no_grad():
             if obs.ndim == 3:
-                out = self.actor.actor_head(self.feature_ext(obs[None])).squeeze(dim=0)
+                act = self.actor.forward(obs.unsqueeze(0), 
+                                         deterministic=deterministic).squeeze(dim=0)
             else:
-                out = self.actor.actor_head(self.feature_ext(obs))
-            act = out[..., :self.actor.act_dim] # Take the mean of the SAC policy
-            act = torch.tanh(act) * self.action_max 
+                act = self.actor.forward(obs, deterministic=deterministic)
         
         return act.cpu().numpy()
     

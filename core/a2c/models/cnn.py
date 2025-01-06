@@ -76,10 +76,10 @@ class CNNActor(nn.Module):
         self.actor_head.apply(lambda m: init_weights(m, gain=0.01))
 
     @abc.abstractmethod
-    def forward(self, obs):
+    def forward(self, obs, deterministic=False):
         """Updates the actor's policy using given observations, then samples 
-        and returns actions from the updated polciy. Always evaluates the 
-        network under torch.no_grad(). """
+        and returns actions from the updated polciy. If deterministic is set
+        to True, the greedy action is returned. """
         pass
     
     @abc.abstractmethod
@@ -98,7 +98,7 @@ class CNNActor(nn.Module):
         pass
 
     @abc.abstractmethod
-    def entropy_grad(self):
+    def entropy(self):
         """Evaluates and returns the entropy of the current stored policy. 
         Gradient tracking is enabled during calculation"""
         pass
@@ -114,10 +114,12 @@ class CNNActorDiscrete(CNNActor):
         # Initialize the policy randomly
         self.pi = Categorical(logits=torch.randn(act_dim, dtype=torch.float32))
 
-    def forward(self, obs):
-        with torch.no_grad():
-            logits = self.actor_head(self.feature_ext(obs))
-            self.pi = Categorical(logits=logits)
+    def forward(self, obs, deterministic=False):
+        logits = self.actor_head(self.feature_ext(obs))
+        self.pi = Categorical(logits=logits)
+        if deterministic:
+            a = torch.argmax(logits, dim=-1)
+        else:
             a = self.pi.sample()
         
         return a
@@ -134,15 +136,12 @@ class CNNActorDiscrete(CNNActor):
 
         return self.pi.log_prob(act)
     
-    def entropy_grad(self):
+    def entropy(self):
         return self.pi.entropy()
     
 class CNNActorContinuous(CNNActor):
-    def __init__(self, feature_ext: FeatureExtractor, act_dim, 
-                 log_std_init, action_max):
+    def __init__(self, feature_ext: FeatureExtractor, act_dim, log_std_init):
         super().__init__(feature_ext, act_dim)
-        self.action_max = nn.Parameter(torch.tensor(action_max, dtype=torch.float32), 
-                                       requires_grad=False)
 
         # Initialize policy log std
         if len(log_std_init) != act_dim:
@@ -153,11 +152,13 @@ class CNNActorContinuous(CNNActor):
         # Initialize the policy randomly
         self.pi = Normal(loc=torch.randn(act_dim), scale=torch.exp(self.log_std))
 
-    def forward(self, obs):
-        with torch.no_grad():
-            mean = self.actor_head(self.feature_ext(obs))
-            self.pi = Normal(mean, torch.exp(self.log_std))
-            a = torch.clip(self.pi.sample(), min=-self.action_max, max=self.action_max)
+    def forward(self, obs, deterministic=False):
+        mean = self.actor_head(self.feature_ext(obs))
+        self.pi = Normal(mean, torch.exp(self.log_std))
+        if deterministic:
+            a = mean
+        else:
+            a = self.pi.sample()
 
         return a
 
@@ -173,7 +174,7 @@ class CNNActorContinuous(CNNActor):
 
         return self.pi.log_prob(act).sum(axis=-1)
     
-    def entropy_grad(self):
+    def entropy(self):
         return self.pi.entropy().sum(dim=-1)
     
 class CNNCritic(nn.Module):
@@ -188,13 +189,9 @@ class CNNCritic(nn.Module):
         self.critic_head.apply(lambda m: init_weights(m, gain=1))
         
     def forward(self, obs):
-        with torch.no_grad():
-            v = torch.squeeze(self.critic_head(self.feature_ext(obs)))
+        v = torch.squeeze(self.critic_head(self.feature_ext(obs)))
         
         return v
-    
-    def forward_grad(self, obs):
-        return torch.squeeze(self.critic_head(self.feature_ext(obs)))
 
     def layer_summary(self):
         print(self.critic_head[0].__class__.__name__, 'input & output shapes:\t', 
@@ -216,9 +213,8 @@ class CNNActorCritic(nn.Module):
             self.actor = CNNActorDiscrete(self.feature_ext, act_dim)
         elif isinstance(env.single_action_space, Box):
             act_dim = env.single_action_space.shape[0]
-            action_max = env.single_action_space.high
             self.actor = CNNActorContinuous(self.feature_ext, act_dim, 
-                                            log_std_init, action_max)
+                                            log_std_init)
         else:
             raise NotImplementedError
         
@@ -226,21 +222,29 @@ class CNNActorCritic(nn.Module):
         self.critic = CNNCritic(self.feature_ext)
     
     def step(self, obs):
-        act = self.actor(obs)
-        logp = self.actor.log_prob_no_grad(act)
-        val = self.critic(obs)
+        with torch.no_grad():
+            act = self.actor.forward(obs)
+            logp = self.actor.log_prob_no_grad(act)
+            val = self.critic.forward(obs)
 
         return act.cpu().numpy(), val.cpu().numpy(), logp.cpu().numpy()
     
-    def act(self, obs):
-        # Make sure that obs always has a batch dimension
-        if obs.ndim == 3:
-            return self.actor(obs[None]).squeeze(dim=0).cpu().numpy()
+    def act(self, obs, deterministic=False):
+        with torch.no_grad():
+            # Make sure that obs always has a batch dimension
+            if obs.ndim == 3:
+                act = self.actor.forward(obs.unsqueeze(0), 
+                                         deterministic=deterministic).squeeze(0)
+            else:
+                act = self.actor.forward(obs, deterministic=deterministic)
         
-        return self.actor(obs).cpu().numpy()
+        return act.cpu().numpy()
     
     def get_terminal_value(self, obs, batch_idx):
-        return self.critic(obs[batch_idx].unsqueeze(0)).cpu().numpy()
+        with torch.no_grad():
+            val_term = self.critic.forward(obs[batch_idx].unsqueeze(0))
+            
+        return val_term.cpu().numpy()
     
     # Only for tracing the actor and critic's networks for tensorboard
     def forward(self, obs):

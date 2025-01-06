@@ -3,7 +3,7 @@ import gymnasium as gym
 from gymnasium.vector import AsyncVectorEnv
 from gymnasium.spaces import Box, Discrete
 from gymnasium.wrappers import FrameStackObservation, GrayscaleObservation
-from gymnasium.wrappers.vector import RescaleAction
+from gymnasium.wrappers.vector import RescaleAction, ClipAction
 from gymnasium.wrappers.utils import RunningMeanStd
 import numpy as np
 import torch
@@ -18,11 +18,7 @@ from core.rl_utils import SkipAndScaleObservation, save_env
 from core.utils import serialize_locals, clear_logs
 
 class A2CBuffer:
-    def __init__(self, env: AsyncVectorEnv, buf_size, gamma=0.98, lam=0.92):
-        if not (isinstance(env.single_action_space, Discrete) or 
-                isinstance(env.single_action_space, Box)):
-            raise NotImplementedError
-
+    def __init__(self, env: AsyncVectorEnv, buf_size, gamma, lam):
         self.gamma, self.lam = gamma, lam
         self.ep_start = np.zeros(env.num_envs, dtype=np.int64)
         self.obs_shape = env.single_observation_space.shape
@@ -127,6 +123,7 @@ class A2CTrainer:
         self.env = AsyncVectorEnv(env_fn)
         self.env = RescaleAction(self.env, min_action=-1.0, max_action=1.0) \
             if isinstance(self.env.single_action_space, Box) else self.env # Rescale cont. action spaces to [-1, 1]
+        self.env = ClipAction(self.env)
         try:
             save_env(env_fn[0], wrappers_kwargs, self.writer.get_logdir(), render_mode='human')
             save_env(env_fn[0], wrappers_kwargs, self.writer.get_logdir(), render_mode='rgb_array')
@@ -169,13 +166,13 @@ class A2CTrainer:
         return loss_pi
 
     def __calc_entropy_loss(self):
-        entropy = self.ac_mod.actor.entropy_grad()
+        entropy = self.ac_mod.actor.entropy()
         entropy_loss = -(entropy.mean())
         
         return entropy_loss
 
     def __calc_val_loss(self, obs, rtg):
-        val = self.ac_mod.critic.forward_grad(obs) 
+        val = self.ac_mod.critic.forward(obs) 
         val_loss = F.mse_loss(val, rtg)
         
         return val_loss

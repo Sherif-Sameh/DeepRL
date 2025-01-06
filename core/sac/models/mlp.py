@@ -96,13 +96,16 @@ class MLPActor(MLP):
         self.net.add_module('actor_output', nn.Linear(hidden_sizes[-1], 2 * act_dim))
         self.net[-1].apply(lambda m: init_weights(m, gain=0.01))
     
-    def forward(self, obs):
+    def forward(self, obs, deterministic=False):
         # Input is assumed to be always 2D
         out = self.net(obs)
         mu, std = out[:, :self.act_dim], torch.exp(out[:, self.act_dim:])
         
         # Compute the actions 
-        u = mu + std * torch.randn_like(mu)
+        if deterministic:
+            u = mu
+        else:
+            u = mu + std * torch.randn_like(mu)
         a = torch.tanh(u)
         
         return a * self.action_max
@@ -160,11 +163,9 @@ class MLPActorCritic(nn.Module):
 
         return act.cpu().numpy(), q_val.cpu().numpy().squeeze()
     
-    def act(self, obs):
+    def act(self, obs, deterministic=False):
         with torch.no_grad():
-            out = self.actor.net(obs)
-            act = out[..., :self.actor.act_dim] # Take the mean of the SAC policy
-            act = torch.tanh(act) * self.action_max
+            act = self.actor.forward(obs, deterministic=deterministic)
         
         return act.cpu().numpy()
     

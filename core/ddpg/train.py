@@ -188,8 +188,7 @@ class DDPGTrainer:
 
         # Initialize environment and attempt to save a copy of it 
         self.env = AsyncVectorEnv(env_fn)
-        self.env = RescaleAction(self.env, min_action=-1.0, max_action=1.0) \
-            if isinstance(self.env.single_action_space, Box) else self.env # Rescale cont. action spaces to [-1, 1]
+        self.env = RescaleAction(self.env, min_action=-1.0, max_action=1.0) # Rescale cont. action spaces to [-1, 1]
         try:
             save_env(env_fn[0], wrappers_kwargs, self.writer.get_logdir(), render_mode='human')
             save_env(env_fn[0], wrappers_kwargs, self.writer.get_logdir(), render_mode='rgb_array')

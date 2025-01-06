@@ -122,20 +122,16 @@ class CNNLSTMActorDiscrete(CNNLSTMActor):
         # Initialize the policy randomly
         self.pi = Categorical(logits=torch.randn(act_dim, dtype=torch.float32))
 
-    def forward(self, obs, features=None):
-        with torch.no_grad():
-            if features is None: features = self.feature_ext(obs)
-            logits = self.actor_head(features.flatten(0, 1))
-            self.pi = Categorical(logits=logits.view(*features.shape[:2], self.act_dim))
+    def forward(self, obs, features=None, deterministic=False):
+        if features is None: features = self.feature_ext(obs)
+        logits = self.actor_head(features.flatten(0, 1)).view(*features.shape[:2], self.act_dim)
+        self.pi = Categorical(logits=logits)
+        if deterministic:
+            a = torch.argmax(logits, dim=-1)
+        else:
             a = self.pi.sample()
         
         return a
-
-    def update_policy(self, obs):
-        with torch.no_grad():
-            features = self.feature_ext(obs)
-            logits = self.actor_head(features.flatten(0, 1))
-            self.pi = Categorical(logits=logits.view(*features.shape[:2], self.act_dim))
 
     def copy_policy(self):
         return Categorical(logits=self.pi.logits)
@@ -152,22 +148,21 @@ class CNNLSTMActorDiscrete(CNNLSTMActor):
 
         return self.pi.log_prob(act)
     
-    def kl_divergence(self, obs, pi_prev):
+    def kl_divergence(self, obs, pi_prev: Categorical):
         obs, mask = obs # Unpack observation and episode mask tuple
-        self.update_policy(obs) # Re-evaluate policy on all observations
+        features = self.feature_ext(obs)
+        logits = self.actor_head(features.flatten(0, 1)).view(*features.shape[:2], self.act_dim)
+        self.pi = Categorical(logits=logits)
         kl = torch.distributions.kl.kl_divergence(pi_prev, self.pi)
         
         return kl[mask].mean()
 
-    def entropy_grad(self):
+    def entropy(self):
         return self.pi.entropy()
     
 class CNNLSTMActorContinuous(CNNLSTMActor):
-    def __init__(self, feature_ext: FeatureExtractor, act_dim, 
-                 log_std_init, action_max):
+    def __init__(self, feature_ext: FeatureExtractor, act_dim, log_std_init):
         super().__init__(feature_ext, act_dim)
-        self.action_max = nn.Parameter(torch.tensor(action_max, dtype=torch.float32), 
-                                       requires_grad=False)
 
         # Initialize policy log std
         if len(log_std_init) != act_dim:
@@ -178,22 +173,16 @@ class CNNLSTMActorContinuous(CNNLSTMActor):
         # Initialize the policy randomly
         self.pi = Normal(loc=torch.randn(act_dim), scale=torch.exp(self.log_std))
 
-    def forward(self, obs, features=None):
-        with torch.no_grad():
-            if features is None: features = self.feature_ext(obs)
-            mean = self.actor_head(features.flatten(0, 1))
-            self.pi = Normal(mean.view(*features.shape[:2], self.act_dim), 
-                             torch.exp(self.log_std))
-            a = torch.clip(self.pi.sample(), min=-self.action_max, max=self.action_max)
+    def forward(self, obs, features=None, deterministic=False):
+        if features is None: features = self.feature_ext(obs)
+        mean = self.actor_head(features.flatten(0, 1)).view(*features.shape[:2], self.act_dim)
+        self.pi = Normal(mean, torch.exp(self.log_std))
+        if deterministic:
+            a = mean
+        else:
+            a = self.pi.sample()
 
         return a
-    
-    def update_policy(self, obs):
-        with torch.no_grad():
-            features = self.feature_ext(obs)
-            mean = self.actor_head(features.flatten(0, 1))
-            self.pi = Normal(mean.view(*features.shape[:2], self.act_dim), 
-                             torch.exp(self.log_std))
 
     def copy_policy(self):
         return Normal(loc=self.pi.mean, scale=self.pi.stddev)
@@ -211,25 +200,16 @@ class CNNLSTMActorContinuous(CNNLSTMActor):
 
         return self.pi.log_prob(act).sum(axis=-1)
     
-    def kl_divergence(self, obs, pi_prev):
+    def kl_divergence(self, obs, pi_prev: Normal):
         obs, mask = obs # Unpack observation and episode mask tuple
-        self.update_policy(obs) # Re-evaluate policy on all observations
-        mu1, log_std1 = self.pi.mean.detach(), self.log_std.data
-        var1 = torch.exp(2 * log_std1)
-        with torch.no_grad():
-            mu0, var0 = pi_prev.mean.detach(), pi_prev.variance.detach()
-            log_std0 = torch.log(pi_prev.stddev)
-        
-        # Compute the element-wise KL divergence
-        pre_sum = 0.5 * (((mu0 - mu1) ** 2 + var0) / (var1 + 1e-8) - 1) + log_std1 - log_std0
-        
-        # Sum over the dimensions of the distribution
-        all_kls = torch.sum(pre_sum, dim=-1)
-        
-        # Return the mean KL divergence over the batch
-        return torch.mean(all_kls[mask])
+        features = self.feature_ext(obs)
+        mean = self.actor_head(features.flatten(0, 1)).view(*features.shape[:2], self.act_dim)
+        self.pi = Normal(mean, torch.exp(self.log_std))
+        kl = torch.distributions.kl.kl_divergence(pi_prev, self.pi)
+
+        return kl[mask].mean()
     
-    def entropy_grad(self):
+    def entropy(self):
         return self.pi.entropy().sum(dim=-1)
     
 class CNNLSTMCritic(nn.Module):
@@ -244,19 +224,12 @@ class CNNLSTMCritic(nn.Module):
         self.critic_head.apply(lambda m: init_weights(m, gain=1))
         
     def forward(self, obs, features=None):
-        with torch.no_grad():
-            if features is None: features = self.feature_ext(obs)
-            v = torch.squeeze(self.critic_head(features.flatten(0, 1)))
-            v = v.view(*features.shape[:2])
+        if features is None: features = self.feature_ext(obs)
+        v = torch.squeeze(self.critic_head(features.flatten(0, 1)))
+        v = v.view(*features.shape[:2])
 
         return v
-    
-    def forward_grad(self, obs):
-        v = torch.squeeze(self.critic_head(self.feature_ext(obs).flatten(0, 1)))
-        v = v.view(*obs.shape[:2])
 
-        return v
-    
     def layer_summary(self):
         print(self.critic_head[0].__class__.__name__, 'input & output shapes:\t', 
               f'(1, {self.feature_ext.features_out})', '(1, 1)\n')
@@ -277,9 +250,8 @@ class CNNLSTMActorCritic(nn.Module):
             self.actor = CNNLSTMActorDiscrete(self.feature_ext, act_dim)
         elif isinstance(env.single_action_space, Box):
             act_dim = env.single_action_space.shape[0]
-            action_max = env.single_action_space.high
             self.actor = CNNLSTMActorContinuous(self.feature_ext, act_dim, 
-                                                log_std_init, action_max)
+                                                log_std_init)
         else:
             raise NotImplementedError
         
@@ -290,28 +262,34 @@ class CNNLSTMActorCritic(nn.Module):
         self.hidden_state_stored = None
     
     def step(self, obs):
-        with torch.no_grad(): features = self.feature_ext(obs.unsqueeze(1))
-        act = self.actor.forward(obs, features=features)
-        val = self.critic.forward(obs, features=features)
-        logp = self.actor.log_prob_no_grad(act)
+        with torch.no_grad(): 
+            features = self.feature_ext.forward(obs.unsqueeze(1))
+            act = self.actor.forward(obs, features=features)
+            val = self.critic.forward(obs, features=features)
+            logp = self.actor.log_prob_no_grad(act)
 
         return act.squeeze(1).cpu().numpy(), val.squeeze(1).cpu().numpy(), \
             logp.squeeze(1).cpu().numpy()
     
-    def act(self, obs):
-        # Make sure that obs always has batch and sequence dimensions
-        if obs.ndim == 3:
-            return self.actor(obs.unsqueeze(0).unsqueeze(0)).squeeze(0, 1).cpu().numpy()
-        
-        return self.actor(obs.unsqueeze(1)).squeeze(1).cpu().numpy()
+    def act(self, obs, deterministic=False):
+        with torch.no_grad():
+            # Make sure that obs always has batch and sequence dimensions
+            if obs.ndim == 3:
+                act = self.actor.forward(obs.unsqueeze(0).unsqueeze(0), 
+                                         deterministic=deterministic).squeeze(0, 1)
+            else:
+                act = self.actor.forward(obs.unsqueeze(1),
+                                         deterministic=deterministic).squeeze(1)
+            
+            return act.cpu().numpy()
     
     def get_terminal_value(self, obs, batch_idx):
         with torch.no_grad():
             features = self.feature_ext.forward_batch_idx(obs[batch_idx].unsqueeze(0).unsqueeze(0), 
                                                           batch_idx)
-            val = self.critic.critic_head(features.squeeze(0, 1)).squeeze()
+            val_term = self.critic.critic_head(features.squeeze(0, 1)).squeeze()
 
-        return val.cpu().numpy()
+        return val_term.cpu().numpy()
     
     # Clears LSTM hidden states across a single or all batch indices
     def reset_hidden_states(self, device, batch_size=1, batch_idx=None,

@@ -271,7 +271,7 @@ class CNNLSTMActorCritic(nn.Module):
         
         return act.squeeze(1).cpu().numpy(), q_val.cpu().numpy().squeeze()
 
-    def act(self, obs):
+    def act(self, obs, deterministic=False):
         with torch.no_grad():
             # Make sure that obs always has batch and sequence dimensions
             if obs.ndim == 3:

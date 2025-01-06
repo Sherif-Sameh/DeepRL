@@ -191,7 +191,7 @@ class CNNLSTMActor(nn.Module):
         self.actor_head.apply(lambda m: init_weights(m, gain=1.0))
         self.actor_head[-1:].apply(lambda m: init_weights(m, gain=0.01))
     
-    def forward(self, obs, features=None):
+    def forward(self, obs, features=None, deterministic=False):
         # Input is assumed to be always 5D
         if features is None: features = self.feature_ext(obs) 
         out = self.actor_head(features.flatten(0, 1))
@@ -199,7 +199,10 @@ class CNNLSTMActor(nn.Module):
         mu, std = mu.view(*features.shape[:2], self.act_dim), std.view(*features.shape[:2], self.act_dim)
         
         # Compute the actions 
-        u = mu + std * torch.randn_like(mu)
+        if deterministic:
+            u = mu
+        else:
+            u = mu + std * torch.randn_like(mu)
         a = torch.tanh(u)
 
         return a * self.action_max
@@ -275,17 +278,16 @@ class CNNLSTMActorCritic(nn.Module):
         
         return act.squeeze(1).cpu().numpy(), q_val.cpu().numpy().squeeze()
 
-    def act(self, obs):
+    def act(self, obs, deterministic=False):
         with torch.no_grad():
             # Make sure that obs always has batch and sequence dimensions
             if obs.ndim == 3:
-                features = self.feature_ext(obs.unsqueeze(0).unsqueeze(0)).squeeze(0, 1)
+                act = self.actor.forward(obs.unsqueeze(0).unsqueeze(0),
+                                         deterministic=deterministic).squeeze(0, 1)
             else:
-                features = self.feature_ext(obs.unsqueeze(1)).squeeze(1)
-            out = self.actor.actor_head(features)
-            act = out[..., :self.actor.act_dim] # Take the mean of the SAC policy
-            act = torch.tanh(act) * self.action_max
-        
+                act = self.actor.forward(obs.unsqueeze(1),
+                                         deterministic=deterministic).squeeze(1)
+                        
         return act.cpu().numpy()
     
     # Clears LSTM hidden states across a single or all batch indices

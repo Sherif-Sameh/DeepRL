@@ -54,10 +54,10 @@ class MLPActor(MLP):
         self.net[-1].apply(lambda m: init_weights(m, gain=0.01))
 
     @abc.abstractmethod
-    def forward(self, obs):
+    def forward(self, obs, deterministic=False):
         """Updates the actor's policy using given observations, then samples 
-        and returns actions from the updated polciy. Always evaluates the 
-        network under torch.no_grad(). """
+        and returns actions from the updated polciy. If deterministic is set
+        to True, the greedy action is returned. """
         pass
     
     @abc.abstractmethod
@@ -76,7 +76,7 @@ class MLPActor(MLP):
         pass
 
     @abc.abstractmethod
-    def entropy_grad(self):
+    def entropy(self):
         """Evaluates and returns the entropy of the current stored policy. 
         Gradient tracking is enabled during calculation"""
         pass
@@ -88,10 +88,12 @@ class MLPActorDiscrete(MLPActor):
         # Initialize the policy randomly
         self.pi = Categorical(logits=torch.randn(act_dim, dtype=torch.float32))
 
-    def forward(self, obs):
-        with torch.no_grad():
-            logits = self.net(obs)
-            self.pi = Categorical(logits=logits)
+    def forward(self, obs, deterministic=False):
+        logits = self.net(obs)
+        self.pi = Categorical(logits=logits)
+        if deterministic:
+            a = torch.argmax(logits, dim=-1)
+        else:
             a = self.pi.sample()
         
         return a
@@ -108,15 +110,12 @@ class MLPActorDiscrete(MLPActor):
 
         return self.pi.log_prob(act)
     
-    def entropy_grad(self):
+    def entropy(self):
         return self.pi.entropy()
     
 class MLPActorContinuous(MLPActor):
-    def __init__(self, obs_dim, act_dim, hidden_sizes, hidden_acts, 
-                 log_std_init, action_max):
+    def __init__(self, obs_dim, act_dim, hidden_sizes, hidden_acts, log_std_init):
         super().__init__(obs_dim, act_dim, hidden_sizes, hidden_acts)
-        self.action_max = nn.Parameter(torch.tensor(action_max, dtype=torch.float32), 
-                                       requires_grad=False)
 
         # Initialize policy log std
         if len(log_std_init) != act_dim:
@@ -127,11 +126,13 @@ class MLPActorContinuous(MLPActor):
         # Initialize the policy randomly
         self.pi = Normal(loc=torch.randn(act_dim), scale=torch.exp(self.log_std))
 
-    def forward(self, obs):
-        with torch.no_grad():
-            mean = self.net(obs)
-            self.pi = Normal(mean, torch.exp(self.log_std))
-            a = torch.clip(self.pi.sample(), min=-self.action_max, max=self.action_max)
+    def forward(self, obs, deterministic=False):
+        mean = self.net(obs)
+        self.pi = Normal(mean, torch.exp(self.log_std))
+        if deterministic:
+            a = mean
+        else:
+            a = self.pi.sample()
 
         return a
 
@@ -147,7 +148,7 @@ class MLPActorContinuous(MLPActor):
 
         return self.pi.log_prob(act).sum(axis=-1)
     
-    def entropy_grad(self):
+    def entropy(self):
         return self.pi.entropy().sum(dim=-1)
     
 class MLPCritic(MLP):
@@ -159,13 +160,9 @@ class MLPCritic(MLP):
         self.net[-1].apply(lambda m: init_weights(m, gain=1.0))
 
     def forward(self, obs):
-        with torch.no_grad():
-            v = torch.squeeze(self.net(obs))
+        v = torch.squeeze(self.net(obs))
         
         return v
-    
-    def forward_grad(self, obs):
-        return torch.squeeze(self.net(obs))
     
 class MLPActorCritic(nn.Module):
     def __init__(self, env: VectorEnv, hidden_sizes_actor, hidden_sizes_critic, 
@@ -180,24 +177,30 @@ class MLPActorCritic(nn.Module):
                                           hidden_acts_actor)
         elif isinstance(env.single_action_space, Box):
             act_dim = env.single_action_space.shape[0]
-            action_max = env.single_action_space.high
             self.actor = MLPActorContinuous(obs_dim, act_dim, hidden_sizes_actor,
-                                            hidden_acts_actor, log_std_init, action_max)
+                                            hidden_acts_actor, log_std_init)
         else:
             raise NotImplementedError
         
     def step(self, obs):
-        act = self.actor(obs)
-        logp = self.actor.log_prob_no_grad(act)
-        val = self.critic(obs)
+        with torch.no_grad():
+            act = self.actor.forward(obs)
+            logp = self.actor.log_prob_no_grad(act)
+            val = self.critic.forward(obs)
 
         return act.cpu().numpy(), val.cpu().numpy(), logp.cpu().numpy()
     
-    def act(self, obs):
-        return self.actor(obs).cpu().numpy()
+    def act(self, obs, deterministic=False):
+        with torch.no_grad():
+            act = self.actor.forward(obs, deterministic=deterministic)
+
+        return act.cpu().numpy()
     
     def get_terminal_value(self, obs, batch_idx):
-        return self.critic(obs[batch_idx]).cpu().numpy()
+        with torch.no_grad():
+            val_term = self.critic.forward(obs[batch_idx]) 
+        
+        return val_term.cpu().numpy()
     
     # Only for tracing the actor and critic's networks for tensorboard
     def forward(self, obs):

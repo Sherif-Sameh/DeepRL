@@ -3,7 +3,7 @@ import gymnasium as gym
 from gymnasium.vector import AsyncVectorEnv
 from gymnasium.spaces import Discrete, Box
 from gymnasium.wrappers import FrameStackObservation, GrayscaleObservation
-from gymnasium.wrappers.vector import RescaleAction
+from gymnasium.wrappers.vector import RescaleAction, ClipAction
 from gymnasium.wrappers.utils import RunningMeanStd
 import numpy as np
 import torch
@@ -103,7 +103,7 @@ class ConjugateGradient:
 
     def conj_grad(self, policy_grad: np.ndarray, actor, device):
         # Calculate the gradient of KL-Divergence
-        kl = actor.kl_divergence_grad()
+        kl = actor.kl_divergence()
         kl_grad = autograd.grad(outputs=kl, inputs=actor.parameters(), create_graph=True, retain_graph=True)
         kl_grad = torch.cat([g.flatten() for g in kl_grad])
 
@@ -160,8 +160,9 @@ class PolicyOptimizer:
             offset = self.backtrack_coeff**i * max_step * x
             nn.utils.vector_to_parameters(params_curr + torch.as_tensor(
                 offset, dtype=torch.float32, device=params_curr.device), actor.parameters())
-            surr_obj = actor.surrogate_obj(obs, act, adv, logp)
-            kl = actor.kl_divergence_no_grad(pi_curr)
+            with torch.no_grad():
+                surr_obj = actor.surrogate_obj(obs, act, adv, logp)
+                kl = actor.kl_divergence(pi_prev=pi_curr)
 
             if (surr_obj > self.surr_obj_min) and (kl <= self.delta):
                 writer.add_scalar('Pi/BacktrackIters', i, epoch+1)
@@ -177,7 +178,6 @@ class PolicyOptimizer:
         
         return False, np.zeros(1)
             
-
 class TRPOTrainer:
     def __init__(self, env_fn, wrappers_kwargs=dict(), use_gpu=False, model_path='', 
                  ac=MLPActorCritic, ac_kwargs=dict(), seed=0, steps_per_epoch=1000,
@@ -215,6 +215,7 @@ class TRPOTrainer:
         self.env = AsyncVectorEnv(env_fn)
         self.env = RescaleAction(self.env, min_action=-1.0, max_action=1.0) \
             if isinstance(self.env.single_action_space, Box) else self.env # Rescale cont. action spaces to [-1, 1]
+        self.env = ClipAction(self.env)
         try:
             save_env(env_fn[0], wrappers_kwargs, self.writer.get_logdir(), render_mode='human')
             save_env(env_fn[0], wrappers_kwargs, self.writer.get_logdir(), render_mode='rgb_array')
@@ -270,7 +271,7 @@ class TRPOTrainer:
         return policy_loss
     
     def __calc_val_loss(self, obs, rtg):
-        val = self.ac_mod.critic.forward_grad(obs)
+        val = self.ac_mod.critic.forward(obs)
         val_loss = F.mse_loss(val, rtg)
 
         return val_loss
@@ -284,9 +285,9 @@ class TRPOTrainer:
             policy_grad = self.__calc_policy_grad(obs, act, logp, adv)
             x, Hx = self.cg_mod.conj_grad(policy_grad, self.ac_mod.actor, self.device)
             success, loss_pi = self.pi_optim.update_policy(epoch, obs, act, 
-                                                                     logp, adv, x, Hx, 
-                                                                     self.ac_mod.actor, 
-                                                                     self.writer)
+                                                           logp, adv, x, Hx, 
+                                                           self.ac_mod.actor, 
+                                                           self.writer)
 
             # Update value function
             self.val_optim.zero_grad()
@@ -352,7 +353,6 @@ class TRPOTrainer:
             if ((epoch + 1) % self.checkpoint_freq) == 0:
                 torch.save(self.ac_mod, os.path.join(self.save_dir, f'model{epoch+1}.pt'))
     
-            
             # Log info about epoch
             if ((epoch + 1) % self.eval_every) == 0:
                 if len(ep_rets) > 0:

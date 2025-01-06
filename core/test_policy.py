@@ -54,12 +54,13 @@ if __name__ == '__main__':
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument('--env', type=str, default='HalfCheetah-v5')
-    parser.add_argument('--use_gpu', type=bool, default=False)
+    parser.add_argument('--use_gpu', action="store_true", default=False)
     parser.add_argument('--run', type=str, default='')
     parser.add_argument('--itr', type=int, default=-1)
     parser.add_argument('--seed', '-s', type=int, default=0)
+    parser.add_argument('--deterministic', action="store_true", default=False)
     parser.add_argument('--num_episodes', type=int, default=100)
-    parser.add_argument('--record', type=bool, default=False)
+    parser.add_argument('--record', action="store_true", default=False)
     parser.add_argument('--video_dir', type=str, default='../video/')
     parser.add_argument('--video_fps', type=int, default=30)
     args = parser.parse_args()
@@ -111,7 +112,8 @@ if __name__ == '__main__':
         while not done:
             if args.record == True:
                 env.render()
-            act = model.act(torch.as_tensor(obs, dtype=torch.float32).to(device))
+            act = model.act(torch.as_tensor(obs, dtype=torch.float32).to(device),
+                            deterministic=args.deterministic)
             obs, rew, terminated, truncated, _ = env.step(act)
             ep_ret, ep_len = ep_ret + rew, ep_len + 1
             done = terminated or truncated

@@ -116,7 +116,7 @@ class MLPDQN(MLP):
 
         return act.cpu().numpy(), q_val.cpu().numpy()
     
-    def act(self, obs):
+    def act(self, obs, deterministic=False):
         with torch.no_grad():
             q_vals = self.net(obs)
             act = torch.argmax(q_vals, dim=-1)

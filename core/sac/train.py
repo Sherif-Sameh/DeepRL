@@ -203,8 +203,7 @@ class SACTrainer:
         
         # Initialize environment and attempt to save a copy of it 
         self.env = AsyncVectorEnv(env_fn)
-        self.env = RescaleAction(self.env, min_action=-1.0, max_action=1.0) \
-            if isinstance(self.env.single_action_space, Box) else self.env # Rescale cont. action spaces to [-1, 1]
+        self.env = RescaleAction(self.env, min_action=-1.0, max_action=1.0) # Rescale cont. action spaces to [-1, 1]
         try:
             save_env(env_fn[0], wrappers_kwargs, log_dir, render_mode='human')
             save_env(env_fn[0], wrappers_kwargs, log_dir, render_mode='rgb_array')
@@ -412,8 +411,8 @@ class SACTrainer:
             obs, _ = env.reset()
             self.ac_mod.reset_hidden_states(self.device, batch_size=self.env.num_envs)
             while len(ep_lens) < self.num_test_episodes*env.num_envs:
-                act = self.ac_mod.act(torch.as_tensor(obs, dtype=torch.float32, 
-                                                      device=self.device))
+                act = self.ac_mod.act(torch.as_tensor(obs, dtype=torch.float32, device=self.device), 
+                                      deterministic=True)
                 obs, rew, terminated, truncated, _ = env.step(act)
                 ep_len, ep_ret = ep_len + 1, ep_ret + rew
                 done = np.logical_or(terminated, truncated)
