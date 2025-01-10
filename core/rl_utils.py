@@ -4,6 +4,7 @@ import pickle
 import numpy as np
 import torch
 import gymnasium as gym
+from gymnasium.vector import VectorEnv
 
 
 ''' Performs the Polyak averaging operation used to update the parameters of a target network in
@@ -73,3 +74,16 @@ def load_env(save_dir, render_mode='human'):
         env = wrapper(env, **(wrappers_kwargs.get(wrapper.__name__, dict())))
     
     return env
+
+''' Run a vectorized environment for the given number of episodes '''
+def run_env(env: VectorEnv, num_episodes):
+        # Run a few episodes to stabilize return variance estimate
+        num_episodes_done = 0
+        env.reset()
+        while num_episodes_done < num_episodes * env.num_envs:
+            act = env.action_space.sample()
+            _, _, terminated, truncated, _ = env.step(act)
+            done = np.logical_or(terminated, truncated)
+            for env_id in range(env.num_envs):
+                if done[env_id]: 
+                    num_episodes_done += 1

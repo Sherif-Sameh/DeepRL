@@ -155,6 +155,7 @@ class CDESP_PPOTrainer(CDESPTrainer, PPOTrainer):
         # Normalize returns for more stable training
         if not isinstance(self.env, NormalizeReward):
             self.env = NormalizeReward(self.env, gamma=self.gamma)
+        self._run_env(num_episodes=10)
 
         # Initialize environment variables
         obs, _ = self.env.reset(seed=self.seed)

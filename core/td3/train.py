@@ -14,7 +14,7 @@ from torch.utils.tensorboard import SummaryWriter
 from core.td3.models.mlp import MLPActorCritic
 from core.td3.models.cnn import CNNActorCritic
 from core.td3.models.cnn_lstm import CNNLSTMActorCritic
-from core.rl_utils import SkipAndScaleObservation, save_env
+from core.rl_utils import SkipAndScaleObservation, save_env, run_env
 from core.utils import serialize_locals, clear_logs
 
 class ReplayBuffer:
@@ -372,7 +372,7 @@ class TD3Trainer:
         self.writer.add_scalar('QVals/min', q_val_np.min(), epoch+1)
         self.writer.flush()
 
-    def learn(self, epochs=100):
+    def learn(self, epochs=100, ep_init=10):
         # Initialize scheduler
         end_factor = self.lr_f/self.lr if self.lr_f is not None else 1.0
         ac_scheduler = LinearLR(self.ac_optim, start_factor=1.0, end_factor=end_factor, 
@@ -382,9 +382,11 @@ class TD3Trainer:
         # Normalize returns for more stable training
         if not isinstance(self.env, NormalizeReward):
             self.env = NormalizeReward(self.env, gamma=self.gamma)
-            
+        self.env.reset(seed=self.seed)
+        run_env(self.env, num_episodes=ep_init)
+
         # Initialize environment variables
-        obs, _ = self.env.reset(seed=self.seed)
+        obs, _ = self.env.reset()
         ep_len = np.zeros(self.env.num_envs, dtype=np.int64)
         autoreset = np.zeros(self.env.num_envs)
         self.ac_mod.reset_hidden_states(self.device, batch_size=self.env.num_envs)
@@ -466,6 +468,7 @@ def get_parser():
     parser.add_argument('--seed', '-s', type=int, default=0)
     parser.add_argument('--steps', type=int, default=1000)
     parser.add_argument('--epochs', type=int, default=100)
+    parser.add_argument('--ep_init', type=int, default=10)
     parser.add_argument('--buf_size', type=int, default=1000000)
     parser.add_argument('--gamma', type=float, default=0.99)
     parser.add_argument('--polyak', type=float, default=0.995)
@@ -552,4 +555,4 @@ if __name__ == '__main__':
                          log_dir=log_dir, save_freq=args.save_freq, 
                          checkpoint_freq=args.checkpoint_freq)
 
-    trainer.learn(args.epochs)
+    trainer.learn(args.epochs, ep_init=args.ep_init)

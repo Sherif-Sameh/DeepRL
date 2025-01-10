@@ -12,7 +12,7 @@ from torch.utils.tensorboard import SummaryWriter
 
 from core.dqn.models.mlp import MLPDQN, MLPDuelingDQN, MLPDDQN, MLPDuelingDDQN
 from core.dqn.models.cnn import CNNDQN, CNNDuelingDQN, CNNDDQN, CNNDuelingDDQN
-from core.rl_utils import SkipAndScaleObservation, save_env
+from core.rl_utils import SkipAndScaleObservation, save_env, run_env
 from core.utils import serialize_locals, clear_logs
 
 class ReplayBuffer:
@@ -341,7 +341,7 @@ class DQNTrainer:
         self.writer.add_scalar('Epsilon', self.q_net_mod.eps, epoch+1)
         self.writer.flush()
 
-    def learn(self, epochs=100):
+    def learn(self, epochs=100, ep_init=10):
         # Initialize epsilon decay rate if not initialized
         if self.q_net_mod.eps_decay_rate is None:
             eps_decay_epochs = 0.2 * epochs
@@ -361,9 +361,11 @@ class DQNTrainer:
         # Normalize returns for more stable training
         if not isinstance(self.env, NormalizeReward):
             self.env = NormalizeReward(self.env, gamma=self.gamma)
+        self.env.reset(seed=self.seed)
+        run_env(self.env, num_episodes=ep_init)
 
         # Initialize environment variables
-        obs, _ = self.env.reset(seed=self.seed)
+        obs, _ = self.env.reset()
         ep_len = np.zeros(self.env.num_envs, dtype=np.int64)
         autoreset = np.zeros(self.env.num_envs)
         q_val_list = []
@@ -446,6 +448,7 @@ def get_parser():
     parser.add_argument('--steps', type=int, default=1000)
     parser.add_argument('--batch_size', type=int, default=100)
     parser.add_argument('--epochs', type=int, default=100)  
+    parser.add_argument('--ep_init', type=int, default=10)
     parser.add_argument('--max_ep_len', type=int, default=-1)
     parser.add_argument('--learning_starts', type=int, default=1000)
     parser.add_argument('--train_freq', type=int, default=4)
@@ -513,4 +516,4 @@ if __name__ == '__main__':
                          lr_f=args.lr_f, max_grad_norm=args.max_grad_norm, clip_grad=args.clip_grad, 
                          log_dir=log_dir, save_freq=args.save_freq, checkpoint_freq=args.checkpoint_freq)
     
-    trainer.learn(epochs=args.epochs)
+    trainer.learn(epochs=args.epochs, ep_init=args.ep_init)

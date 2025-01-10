@@ -15,7 +15,7 @@ from torch.utils.tensorboard import SummaryWriter
 
 from core.trpo.models.mlp import MLPActorCritic
 from core.trpo.models.cnn import CNNActorCritic
-from core.rl_utils import SkipAndScaleObservation, save_env
+from core.rl_utils import SkipAndScaleObservation, save_env, run_env
 from core.utils import serialize_locals, clear_logs
 
 np_eps = 1e-8 
@@ -318,8 +318,21 @@ class TRPOTrainer:
     def _train(self, obs_final, ep_ret, ep_len, epoch):
         self._proc_epoch_rollout(obs_final, ep_ret, ep_len)
         self._update_params(epoch)
-        
-    def learn(self, epochs=100):
+    
+    def _log_ep_stats(self, epoch, ep_ret_list, ep_len_list):
+        if len(ep_ret_list) > 0:
+            total_steps_so_far = (epoch+1)*self.steps_per_epoch*self.env.num_envs
+            ep_len_np, ep_ret_np = np.array(ep_len_list), np.array(ep_ret_list)
+            self.writer.add_scalar('EpLen/mean', ep_len_np.mean(), total_steps_so_far)
+            self.writer.add_scalar('EpRet/mean', ep_ret_np.mean(), total_steps_so_far)
+            self.writer.add_scalar('EpRet/max', ep_ret_np.max(), total_steps_so_far)
+            self.writer.add_scalar('EpRet/min', ep_ret_np.min(), total_steps_so_far)
+        self.writer.add_scalar('VVals/mean', self.buf.val.mean(), epoch+1)
+        self.writer.add_scalar('VVals/max', self.buf.val.max(), epoch+1)
+        self.writer.add_scalar('VVals/min', self.buf.val.min(), epoch+1)
+        self.writer.flush()
+
+    def learn(self, epochs=100, ep_init=10):
         # Initialize scheduler
         end_factor = self.lr_f/self.lr if self.lr_f is not None else 1.0
         val_scheduler = LinearLR(self.val_optim, start_factor=1.0, end_factor=end_factor, 
@@ -329,9 +342,11 @@ class TRPOTrainer:
         # Normalize returns for more stable training
         if not isinstance(self.env, NormalizeReward):
             self.env = NormalizeReward(self.env, gamma=self.gamma)
-
+        self.env.reset(seed=self.seed)
+        run_env(self.env, num_episodes=ep_init)
+        
         # Initialize environment variables
-        obs, _ = self.env.reset(seed=self.seed)
+        obs, _ = self.env.reset()
         ep_len, ep_ret = np.zeros(self.env.num_envs, dtype=np.int64), np.zeros(self.env.num_envs)
         ep_len_list, ep_ret_list = [], []
         autoreset = np.zeros(self.env.num_envs)
@@ -401,6 +416,7 @@ def get_parser():
     parser.add_argument('--steps', type=int, default=1000)
     parser.add_argument('--eval_every', type=int, default=4)
     parser.add_argument('--epochs', type=int, default=100)
+    parser.add_argument('--ep_init', type=int, default=10)
     parser.add_argument('--gamma', type=float, default=0.99)
     parser.add_argument('--delta', type=float, default=0.01)
     parser.add_argument('--surr_obj_min', type=float, default=0.0)
@@ -477,4 +493,4 @@ if __name__ == '__main__':
                           lam=args.lam, log_dir=log_dir, save_freq=args.save_freq, 
                           checkpoint_freq=args.checkpoint_freq)
     
-    trainer.learn(epochs=args.epochs)
+    trainer.learn(epochs=args.epochs, ep_init=args.ep_init)
