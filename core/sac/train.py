@@ -254,7 +254,7 @@ class SACTrainer:
         self.ac_optim = Adam(self.ac_mod.parameters(), lr=lr)
         self.alpha_optim = Adam(self.alpha_mod.parameters(), lr=lr)
 
-    def __calc_q_loss(self, alpha, obs: torch.Tensor, act: torch.Tensor, rew: torch.Tensor, 
+    def _calc_q_loss(self, alpha, obs: torch.Tensor, act: torch.Tensor, rew: torch.Tensor, 
                       obs_next: torch.Tensor, done: torch.Tensor, loss_mask: torch.Tensor):
         # Determine target actions and their log probs for TD targets
         self.ac_mod.reset_hidden_states(self.device, batch_size=obs.shape[0])
@@ -284,7 +284,7 @@ class SACTrainer:
 
         return F.mse_loss(q_vals_1[loss_mask], td_target), F.mse_loss(q_vals_2[loss_mask], td_target)
     
-    def __calc_pi_loss(self, alpha, obs: torch.Tensor, loss_mask: torch.Tensor):
+    def _calc_pi_loss(self, alpha, obs: torch.Tensor, loss_mask: torch.Tensor):
         # Re-propagate actions and their log probs through actor for gradient tracking
         self.ac_mod.reset_hidden_states(self.device, batch_size=obs.shape[0])
         act, log_prob = self.ac_mod.actor.log_prob(obs)  
@@ -299,12 +299,12 @@ class SACTrainer:
 
         return (-q_vals[loss_mask] + alpha * log_prob[loss_mask]).mean(), log_prob
 
-    def __calc_alpha_loss(self, logp: torch.Tensor, loss_mask: torch.Tensor):
+    def _calc_alpha_loss(self, logp: torch.Tensor, loss_mask: torch.Tensor):
         log_alpha = self.alpha_mod.log_alpha
         
         return -(log_alpha * (logp[loss_mask].detach().cpu() + self.entropy_target)).mean()
     
-    def __update_params(self, epoch):
+    def _update_params(self, epoch):
         # Get mini-batch from replay buffer
         batch = self.buf.get_batch(self.device)
 
@@ -319,13 +319,13 @@ class SACTrainer:
         
         # Get critics loss
         self.ac_optim.zero_grad()
-        loss_q1, loss_q2 = self.__calc_q_loss(alpha_det, obs, act, rew, 
+        loss_q1, loss_q2 = self._calc_q_loss(alpha_det, obs, act, rew, 
                                               obs_next, done, mask)
 
         # Get actor loss (critic's weights are frozen temporarily)
         self.ac_mod.critic_1.set_grad_tracking(val=False)
         self.ac_mod.critic_2.set_grad_tracking(val=False)
-        loss_pi, logp = self.__calc_pi_loss(alpha_det, obs, mask)
+        loss_pi, logp = self._calc_pi_loss(alpha_det, obs, mask)
         self.ac_mod.critic_1.set_grad_tracking(val=True)
         self.ac_mod.critic_2.set_grad_tracking(val=True)
         
@@ -341,7 +341,7 @@ class SACTrainer:
         # Update the log alpha parameter if its estimated online 
         if self.auto_alpha == True:
             self.alpha_optim.zero_grad()
-            loss_alpha = self.__calc_alpha_loss(logp, mask)
+            loss_alpha = self._calc_alpha_loss(logp, mask)
             loss_alpha.backward()
             self.alpha_optim.step()
             if self.alpha_min > 0:    
@@ -356,77 +356,102 @@ class SACTrainer:
         self.writer.add_scalar('Loss/LossQ1', loss_q1.item(), epoch+1)
         self.writer.add_scalar('Loss/LossQ2', loss_q2.item(), epoch+1)
         self.writer.add_scalar('Loss/LossPi', loss_pi.item(), epoch+1)
+    
+    def _proc_env_rollout(self, env_id, ep_len):
+        self.buf.increment_ep_num(env_id)
+        self.ac_mod.reset_hidden_states(self.device, batch_idx=env_id) 
+        ep_len[env_id] = 0
+    
+    def _train(self, epoch):
+        self.ac_mod.reset_hidden_states(self.device, save=True)
+        for _ in range(self.num_updates):
+            self._update_params(epoch)
+        self.ac_mod.reset_hidden_states(self.device, restore=True)
 
-    def train_mod(self, epochs=100):
+    def _eval(self):
+        # Evaluate deterministic policy (skip return normalization wrapper)
+        env = self.env.env if isinstance(self.env, NormalizeReward) else self.env 
+        ep_len, ep_ret = np.zeros(env.num_envs), np.zeros(env.num_envs)
+        ep_len_list, ep_ret_list = [], []
+        to_tensor = lambda x: torch.as_tensor(x, dtype=torch.float32, device=self.device)
+        
+        obs, _ = env.reset()
+        self.ac_mod.reset_hidden_states(self.device, batch_size=self.env.num_envs)
+        while len(ep_len_list) < self.num_test_episodes*env.num_envs:
+            act = self.ac_mod.act(to_tensor(obs), deterministic=True)
+            obs, rew, terminated, truncated, _ = env.step(act)
+            ep_len, ep_ret = ep_len + 1, ep_ret + rew
+            done = np.logical_or(terminated, truncated)
+            for env_id in range(env.num_envs):
+                if done[env_id]:
+                    ep_len_list.append(ep_len[env_id])
+                    ep_ret_list.append(ep_ret[env_id])
+                    ep_len[env_id], ep_ret[env_id] = 0, 0
+                    self.ac_mod.reset_hidden_states(self.device, batch_idx=env_id)
+        self.ac_mod.reset_hidden_states(self.device, batch_size=self.env.num_envs)
+
+        return ep_len_list, ep_ret_list
+    
+    def _log_ep_stats(self, epoch, ep_ret_list, ep_len_list, q_val_list):
+        total_steps_so_far = (epoch+1)*self.steps_per_epoch*self.env.num_envs
+        ep_len_np, ep_ret_np, q_val_np = np.array(ep_len_list), np.array(ep_ret_list), np.array(q_val_list)
+        self.writer.add_scalar('EpLen/mean', ep_len_np.mean(), total_steps_so_far)
+        self.writer.add_scalar('EpRet/mean', ep_ret_np.mean(), total_steps_so_far)
+        self.writer.add_scalar('EpRet/max', ep_ret_np.max(), total_steps_so_far)
+        self.writer.add_scalar('EpRet/min', ep_ret_np.min(), total_steps_so_far)
+        self.writer.add_scalar('QVals/mean', q_val_np.mean(), epoch+1)
+        self.writer.add_scalar('QVals/max', q_val_np.max(), epoch+1)
+        self.writer.add_scalar('QVals/min', q_val_np.min(), epoch+1)
+        self.writer.add_scalar('Alpha', self.alpha_mod.forward().item(), epoch+1)
+        self.writer.flush()
+
+    def learn(self, epochs=100):
         # Initialize scheduler
         end_factor = self.lr_f/self.lr if self.lr_f is not None else 1.0
         ac_scheduler = LinearLR(self.ac_optim, start_factor=1.0, end_factor=end_factor, 
                                 total_iters=epochs)
         alpha_scheduler = LinearLR(self.alpha_optim, start_factor=1.0, end_factor=end_factor,
                                    total_iters=epochs)
+        to_tensor = lambda x: torch.as_tensor(x, dtype=torch.float32, device=self.device)
 
         # Normalize returns for more stable training
         if not isinstance(self.env, NormalizeReward):
-            self.env = NormalizeReward(self.env)
+            self.env = NormalizeReward(self.env, gamma=self.gamma)
         
         # Initialize environment variables
         obs, _ = self.env.reset(seed=self.seed)
+        ep_len = np.zeros(self.env.num_envs, dtype=np.int64)
         autoreset = np.zeros(self.env.num_envs)
         self.ac_mod.reset_hidden_states(self.device, batch_size=self.env.num_envs)
-        q_vals = []
+        q_val_list = []
 
         for epoch in range(epochs):
             for step in range(self.steps_per_epoch):
                 if (step + self.steps_per_epoch*epoch) > self.start_steps:
-                    act, q_val = self.ac_mod.step(torch.as_tensor(obs, dtype=torch.float32, 
-                                                                  device=self.device))
+                    act, q_val = self.ac_mod.step(to_tensor(obs))
                 else:
                     act = self.env.action_space.sample()
-                    _, q_val = self.ac_mod.step(torch.as_tensor(obs, dtype=torch.float32, 
-                                                                device=self.device))
+                    _, q_val = self.ac_mod.step(to_tensor(obs))
                 obs_next, rew, terminated, truncated, _ = self.env.step(act)
 
                 for env_id in range(self.env.num_envs):
                     if not autoreset[env_id]:
                         self.buf.update_buffer(env_id, obs[env_id], act[env_id], 
                                                rew[env_id], terminated[env_id])
-                        q_vals.append(q_val[env_id])
+                        q_val_list.append(q_val[env_id])
                     else:
-                        self.buf.increment_ep_num(env_id)
-                        self.ac_mod.reset_hidden_states(self.device, batch_idx=env_id)
-                obs = obs_next
+                        self._proc_env_rollout(env_id, ep_len)
+                obs, ep_len = obs_next, ep_len + 1
                 autoreset = np.logical_or(terminated, truncated)
 
                 if (self.buf.get_buffer_size() >= self.learning_starts) \
                     and ((step % self.update_every) == 0):
-                    self.ac_mod.reset_hidden_states(self.device, save=True)
-                    for _ in range(self.num_updates):
-                        self.__update_params(epoch)
-                    self.ac_mod.reset_hidden_states(self.device, restore=True)
+                    self._train(epoch)
             
-            # Evaluate deterministic policy (skip return normalization wrapper)
-            env = self.env.env if isinstance(self.env, NormalizeReward) else self.env 
-            ep_len, ep_ret = np.zeros(env.num_envs), np.zeros(env.num_envs)
-            ep_lens, ep_rets = [], []
-            obs, _ = env.reset()
-            self.ac_mod.reset_hidden_states(self.device, batch_size=self.env.num_envs)
-            while len(ep_lens) < self.num_test_episodes*env.num_envs:
-                act = self.ac_mod.act(torch.as_tensor(obs, dtype=torch.float32, device=self.device), 
-                                      deterministic=True)
-                obs, rew, terminated, truncated, _ = env.step(act)
-                ep_len, ep_ret = ep_len + 1, ep_ret + rew
-                done = np.logical_or(terminated, truncated)
-                if np.any(done):
-                    for env_id in range(env.num_envs):
-                        if done[env_id]:
-                            ep_lens.append(ep_len[env_id])
-                            ep_rets.append(ep_ret[env_id])
-                            ep_len[env_id], ep_ret[env_id] = 0, 0
-                            self.ac_mod.reset_hidden_states(self.device, batch_idx=env_id)
+            ep_len_list, ep_ret_list = self._eval()
             obs, _ = self.env.reset()
             ac_scheduler.step()
             alpha_scheduler.step()
-            self.ac_mod.reset_hidden_states(self.device, batch_size=self.env.num_envs)
 
             if ((epoch + 1) % self.save_freq) == 0:
                 torch.save(self.ac_mod, os.path.join(self.save_dir, 'model.pt'))
@@ -434,18 +459,8 @@ class SACTrainer:
                 torch.save(self.ac_mod, os.path.join(self.save_dir, f'model{epoch+1}.pt'))
             
             # Log info about epoch
-            total_steps_so_far = (epoch+1)*self.steps_per_epoch*self.env.num_envs
-            ep_lens, ep_rets, q_vals = np.array(ep_lens), np.array(ep_rets), np.array(q_vals)
-            self.writer.add_scalar('EpLen/mean', ep_lens.mean(), total_steps_so_far)
-            self.writer.add_scalar('EpRet/mean', ep_rets.mean(), total_steps_so_far)
-            self.writer.add_scalar('EpRet/max', ep_rets.max(), total_steps_so_far)
-            self.writer.add_scalar('EpRet/min', ep_rets.min(), total_steps_so_far)
-            self.writer.add_scalar('QVals/mean', q_vals.mean(), epoch+1)
-            self.writer.add_scalar('QVals/max', q_vals.max(), epoch+1)
-            self.writer.add_scalar('QVals/min', q_vals.min(), epoch+1)
-            self.writer.add_scalar('Alpha', self.alpha_mod.forward().item(), epoch+1)
-            self.writer.flush()
-            q_vals = []
+            self._log_ep_stats(epoch, ep_ret_list, ep_len_list, q_val_list)
+            q_val_list = []
         
         # Save final model
         torch.save(self.ac_mod, os.path.join(self.save_dir, 'model.pt'))
@@ -472,6 +487,7 @@ def get_parser():
     parser.add_argument('--out_channels', nargs='+', type=int, default=[32, 64, 64])
     parser.add_argument('--kernel_sizes', nargs='+', type=int, default=[8, 4, 3])
     parser.add_argument('--strides', nargs='+', type=int, default=[4, 2, 1])
+    parser.add_argument('--padding', nargs='+', type=int, default=[0, 0, 0])
     parser.add_argument('--features_out', nargs='+', type=int, default=[512])
 
     # CNN-LSTM specific model arguments
@@ -535,6 +551,7 @@ if __name__ == '__main__':
                          out_channels=args.out_channels,
                          kernel_sizes=args.kernel_sizes, 
                          strides=args.strides, 
+                         padding=args.padding,
                          features_out=args.features_out,
                          hidden_sizes_actor=args.hid_act, 
                          hidden_sizes_critic=args.hid_cri)
@@ -565,4 +582,4 @@ if __name__ == '__main__':
                          seq_stride=args.seq_stride, log_dir=log_dir, save_freq=args.save_freq, 
                          checkpoint_freq=args.checkpoint_freq)
 
-    trainer.train_mod(args.epochs)
+    trainer.learn(epochs=args.epochs)

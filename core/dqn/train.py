@@ -266,7 +266,7 @@ class DQNTrainer:
         # Initialize optimizer
         self.q_optim = Adam(self.q_net_mod.parameters(), lr=lr)
         
-    def __calc_td_error(self, obs: torch.Tensor, act: torch.Tensor, rew: torch.Tensor, 
+    def _calc_td_error(self, obs: torch.Tensor, act: torch.Tensor, rew: torch.Tensor, 
                         obs_next: torch.Tensor, done: torch.Tensor):
         # Get current and target Q vals and mask target Q vals where done is True
         q_vals = self.q_net_mod.forward_grad(obs, act)
@@ -279,13 +279,13 @@ class DQNTrainer:
 
         return td_error
     
-    def __update_params(self, epoch):
+    def _update_params(self, epoch):
         # Get mini-batch and perform one parameter update for the Q network
         obs, act, rew, obs_next, done = self.buf.get_batch(self.device)
 
         # Calculate Q-function loss and gradients
         self.q_optim.zero_grad()
-        td_error = self.__calc_td_error(obs, act, rew, obs_next, done)
+        td_error = self._calc_td_error(obs, act, rew, obs_next, done)
         loss_weights = self.buf.get_weights(self.device)
         loss_q = ((td_error * loss_weights)**2).mean()
         loss_q.backward()
@@ -299,8 +299,49 @@ class DQNTrainer:
 
         # Log epoch statistics
         self.writer.add_scalar('Loss/LossQ', loss_q.item(), epoch+1)
+
+    def _proc_env_rollout(self, env_id, ep_len):
+        ep_len[env_id] = 0
     
-    def train_mod(self, epochs=100):
+    def _train(self, epoch):
+        for _ in range(self.num_updates):
+            self._update_params(epoch)
+
+    def _eval(self):
+        # Evaluate deterministic policy (skip return normalization wrapper)
+        env = self.env.env if isinstance(self.env, NormalizeReward) else self.env 
+        ep_len, ep_ret = np.zeros(env.num_envs), np.zeros(env.num_envs)
+        ep_len_list, ep_ret_list = [], []
+        to_tensor = lambda x: torch.as_tensor(x, dtype=torch.float32, device=self.device)
+        
+        obs, _ = env.reset()
+        while len(ep_len_list) < self.num_test_episodes*env.num_envs:
+            act = self.q_net_mod.act(to_tensor(obs))
+            obs, rew, terminated, truncated, _ = env.step(act)
+            ep_len, ep_ret = ep_len + 1, ep_ret + rew
+            done = np.logical_or(terminated, truncated)
+            for env_id in range(env.num_envs):
+                if done[env_id]:
+                    ep_len_list.append(ep_len[env_id])
+                    ep_ret_list.append(ep_ret[env_id])
+                    ep_len[env_id], ep_ret[env_id] = 0, 0
+
+        return ep_len_list, ep_ret_list
+    
+    def _log_ep_stats(self, epoch, ep_ret_list, ep_len_list, q_val_list):
+        total_steps_so_far = (epoch+1)*self.steps_per_epoch*self.env.num_envs
+        ep_len_np, ep_ret_np, q_val_np = np.array(ep_len_list), np.array(ep_ret_list), np.array(q_val_list)
+        self.writer.add_scalar('EpLen/mean', ep_len_np.mean(), total_steps_so_far)
+        self.writer.add_scalar('EpRet/mean', ep_ret_np.mean(), total_steps_so_far)
+        self.writer.add_scalar('EpRet/max', ep_ret_np.max(), total_steps_so_far)
+        self.writer.add_scalar('EpRet/min', ep_ret_np.min(), total_steps_so_far)
+        self.writer.add_scalar('QVals/mean', q_val_np.mean(), epoch+1)
+        self.writer.add_scalar('QVals/max', q_val_np.max(), epoch+1)
+        self.writer.add_scalar('QVals/min', q_val_np.min(), epoch+1)
+        self.writer.add_scalar('Epsilon', self.q_net_mod.eps, epoch+1)
+        self.writer.flush()
+
+    def learn(self, epochs=100):
         # Initialize epsilon decay rate if not initialized
         if self.q_net_mod.eps_decay_rate is None:
             eps_decay_epochs = 0.2 * epochs
@@ -315,80 +356,54 @@ class DQNTrainer:
         end_factor = self.lr_f/self.lr if self.lr_f is not None else 1.0
         q_scheduler = LinearLR(self.q_optim, start_factor=1.0, end_factor=end_factor, 
                                total_iters=epochs)
+        to_tensor = lambda x: torch.as_tensor(x, dtype=torch.float32, device=self.device)
 
         # Normalize returns for more stable training
         if not isinstance(self.env, NormalizeReward):
-            self.env = NormalizeReward(self.env)
+            self.env = NormalizeReward(self.env, gamma=self.gamma)
 
         # Initialize environment variables
         obs, _ = self.env.reset(seed=self.seed)
+        ep_len = np.zeros(self.env.num_envs, dtype=np.int64)
         autoreset = np.zeros(self.env.num_envs)
-        q_vals = []
+        q_val_list = []
 
         for epoch in range(epochs):
             for step in range(self.steps_per_epoch):
-                act, q_val = self.q_net_mod.step(torch.as_tensor(obs, dtype=torch.float32, 
-                                                                 device=self.device))
+                act, q_val = self.q_net_mod.step(to_tensor(obs))
                 obs_next, rew, terminated, truncated, _ = self.env.step(act)
 
                 for env_id in range(self.env.num_envs):
                     if not autoreset[env_id]:
                         self.buf.update_buffer(env_id, obs[env_id], act[env_id], 
                                                rew[env_id], terminated[env_id])
-                        q_vals.append(q_val[env_id])
-                obs = obs_next
+                        q_val_list.append(q_val[env_id])
+                    else:
+                        self._proc_env_rollout(env_id, ep_len)
+                obs, ep_len = obs_next, ep_len + 1
                 autoreset = np.logical_or(terminated, truncated)
                 
                 if (self.buf.get_buffer_size() >= self.learning_starts) \
                     and ((step % self.train_freq) == 0):
-                    for _ in range(self.num_updates):
-                        self.__update_params(epoch)
+                    self._train(epoch)
 
                 if (step % self.target_network_update_freq) == 0:
                     self.q_net_mod.update_target()
 
-
-            # Evaluate deterministic policy (skip return normalization wrapper)
-            env = self.env.env if isinstance(self.env, NormalizeReward) else self.env 
-            ep_len, ep_ret = np.zeros(env.num_envs), np.zeros(env.num_envs)
-            ep_lens, ep_rets = [], []
-            obs, _ = env.reset()
-            while len(ep_lens) < self.num_test_episodes*env.num_envs:
-                act = self.q_net_mod.act(torch.as_tensor(obs, dtype=torch.float32, 
-                                                         device=self.device))
-                obs, rew, terminated, truncated, _ = env.step(act)
-                ep_len, ep_ret = ep_len + 1, ep_ret + rew
-                done = np.logical_or(terminated, truncated)
-                if np.any(done):
-                    for env_id in range(env.num_envs):
-                        if done[env_id]:
-                            ep_lens.append(ep_len[env_id])
-                            ep_rets.append(ep_ret[env_id])
-                            ep_len[env_id], ep_ret[env_id] = 0, 0
+            ep_len_list, ep_ret_list = self._eval()
             obs, _ = self.env.reset()
+            q_scheduler.step()
+            self.q_net_mod.update_eps_exp()
+            self.buf.update_beta()
 
             if ((epoch + 1) % self.save_freq) == 0:
                 torch.save(self.q_net_mod, os.path.join(self.save_dir, 'model.pt'))
             if ((epoch + 1) % self.checkpoint_freq) == 0:
                 torch.save(self.q_net_mod, os.path.join(self.save_dir, f'model{epoch+1}.pt'))
-
-            q_scheduler.step()
-            self.q_net_mod.update_eps_exp()
-            self.buf.update_beta()
             
             # Log info about epoch
-            total_steps_so_far = (epoch+1)*self.steps_per_epoch*self.env.num_envs
-            ep_lens, ep_rets, q_vals = np.array(ep_lens), np.array(ep_rets), np.array(q_vals)
-            self.writer.add_scalar('EpLen/mean', ep_lens.mean(), total_steps_so_far)
-            self.writer.add_scalar('EpRet/mean', ep_rets.mean(), total_steps_so_far)
-            self.writer.add_scalar('EpRet/max', ep_rets.max(), total_steps_so_far)
-            self.writer.add_scalar('EpRet/min', ep_rets.min(), total_steps_so_far)
-            self.writer.add_scalar('QVals/mean', q_vals.mean(), epoch+1)
-            self.writer.add_scalar('QVals/max', q_vals.max(), epoch+1)
-            self.writer.add_scalar('QVals/min', q_vals.min(), epoch+1)
-            self.writer.add_scalar('Epsilon', self.q_net_mod.eps, epoch+1)
-            self.writer.flush()
-            q_vals = []
+            self._log_ep_stats(epoch, ep_ret_list, ep_len_list, q_val_list)
+            q_val_list = []
         
         # Save final model
         torch.save(self.q_net_mod, os.path.join(self.save_dir, 'model.pt'))
@@ -422,6 +437,7 @@ def get_parser():
     parser.add_argument('--out_channels', nargs='+', type=int, default=[32, 64, 64])
     parser.add_argument('--kernel_sizes', nargs='+', type=int, default=[8, 4, 3])
     parser.add_argument('--strides', nargs='+', type=int, default=[4, 2, 1])
+    parser.add_argument('--padding', nargs='+', type=int, default=[0, 0, 0])
     parser.add_argument('--features_out', nargs='+', type=int, default=[512])
     
     # Rest of training arguments
@@ -471,6 +487,7 @@ if __name__ == '__main__':
                             out_channels=args.out_channels,
                             kernel_sizes=args.kernel_sizes, 
                             strides=args.strides, 
+                            padding=args.padding,
                             features_out=args.features_out)
         env_fn_def = lambda render_mode=None: gym.make(args.env, max_episode_steps=max_ep_len, 
                                                        render_mode=render_mode)
@@ -496,4 +513,4 @@ if __name__ == '__main__':
                          lr_f=args.lr_f, max_grad_norm=args.max_grad_norm, clip_grad=args.clip_grad, 
                          log_dir=log_dir, save_freq=args.save_freq, checkpoint_freq=args.checkpoint_freq)
     
-    trainer.train_mod(args.epochs)
+    trainer.learn(epochs=args.epochs)

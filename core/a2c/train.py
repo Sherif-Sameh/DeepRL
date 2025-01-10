@@ -3,8 +3,7 @@ import gymnasium as gym
 from gymnasium.vector import AsyncVectorEnv
 from gymnasium.spaces import Box, Discrete
 from gymnasium.wrappers import FrameStackObservation, GrayscaleObservation
-from gymnasium.wrappers.vector import RescaleAction, ClipAction
-from gymnasium.wrappers.utils import RunningMeanStd
+from gymnasium.wrappers.vector import RescaleAction, ClipAction, NormalizeReward
 import numpy as np
 import torch
 import torch.nn.functional as F
@@ -24,7 +23,6 @@ class A2CBuffer:
         self.obs_shape = env.single_observation_space.shape
         self.act_shape = env.single_action_space.shape
         env_buf_size = buf_size // env.num_envs
-        self.rtg_rms = RunningMeanStd(dtype=np.float32)
 
         self.obs = np.zeros((env.num_envs, env_buf_size) + self.obs_shape, dtype=np.float32)
         self.act = np.zeros((env.num_envs, env_buf_size) + self.act_shape, dtype=np.float32)
@@ -65,11 +63,6 @@ class A2CBuffer:
     def terminate_epoch(self):
         self.ep_start = np.zeros_like(self.ep_start)
 
-        # Normalize returns to go
-        self.rtg_rms.update(self.rtg.reshape(-1))
-        rtg_mean, rtg_std = self.rtg_rms.mean, np.sqrt(self.rtg_rms.var)
-        self.rtg = (self.rtg - rtg_mean)/(rtg_std + 1e-8)
-
         # Normalize advantages
         adv_mean, adv_std = self.adv.mean(), self.adv.std()
         self.adv = (self.adv - adv_mean)/(adv_std + 1e-8)
@@ -95,6 +88,7 @@ class A2CTrainer:
         self.seed = seed
         self.steps_per_epoch = steps_per_epoch
         self.eval_every = eval_every
+        self.gamma = gamma
         self.lr = lr
         self.lr_f = lr_f
         self.ent_coeff = ent_coeff
@@ -121,9 +115,8 @@ class A2CTrainer:
         
         # Initialize environment and attempt to save a copy of it 
         self.env = AsyncVectorEnv(env_fn)
-        self.env = RescaleAction(self.env, min_action=-1.0, max_action=1.0) \
+        self.env = ClipAction(RescaleAction(self.env, min_action=-1.0, max_action=1.0)) \
             if isinstance(self.env.single_action_space, Box) else self.env # Rescale cont. action spaces to [-1, 1]
-        self.env = ClipAction(self.env)
         try:
             save_env(env_fn[0], wrappers_kwargs, self.writer.get_logdir(), render_mode='human')
             save_env(env_fn[0], wrappers_kwargs, self.writer.get_logdir(), render_mode='rgb_array')
@@ -159,25 +152,25 @@ class A2CTrainer:
         # Initialize optimizer
         self.ac_optim = Adam(self.ac_mod.parameters(), lr=lr)
 
-    def __calc_policy_loss(self, obs, act, adv):
+    def _calc_policy_loss(self, obs, act, adv):
         logp = self.ac_mod.actor.log_prob_grad(obs, act)
         loss_pi = -(logp * adv).mean()
 
         return loss_pi
 
-    def __calc_entropy_loss(self):
+    def _calc_entropy_loss(self):
         entropy = self.ac_mod.actor.entropy()
         entropy_loss = -(entropy.mean())
         
         return entropy_loss
 
-    def __calc_val_loss(self, obs, rtg):
+    def _calc_val_loss(self, obs, rtg):
         val = self.ac_mod.critic.forward(obs) 
         val_loss = F.mse_loss(val, rtg)
         
         return val_loss
         
-    def __update_params(self, epoch):
+    def _update_params(self, epoch):
         # Get all collected experiences from buffer as tensors
         obs, act, adv, logp, rtg = self.buf.get_tensors(self.device)
 
@@ -186,9 +179,9 @@ class A2CTrainer:
             self.ac_optim.zero_grad()
             
             # Get policy, entropy and value losses
-            loss_pi = self.__calc_policy_loss(obs, act, adv)
-            loss_ent = self.__calc_entropy_loss()
-            loss_val = self.__calc_val_loss(obs, rtg)
+            loss_pi = self._calc_policy_loss(obs, act, adv)
+            loss_ent = self._calc_entropy_loss()
+            loss_val = self._calc_val_loss(obs, rtg)
 
             # Combine losses and compute gradients
             loss = loss_pi + self.ent_coeff * loss_ent + self.vf_coeff * loss_val
@@ -207,23 +200,60 @@ class A2CTrainer:
         self.writer.add_scalar('Loss/LossV', loss_val.item(), epoch+1)
         self.writer.add_scalar('Pi/KL', approx_kl, epoch+1)
 
+    def _proc_env_rollout(self, env_id, val_terminal, rollout_len, ep_ret, ep_len, 
+                          ep_ret_list: list, ep_len_list: list):
+        ep_ret[env_id] += self.buf.terminate_ep(env_id, rollout_len, val_terminal)
+        ep_ret[env_id] *= np.sqrt(self.env.return_rms.var + self.env.epsilon)
+        ep_len_list.append(ep_len[env_id])
+        ep_ret_list.append(ep_ret[env_id])
+        ep_len[env_id], ep_ret[env_id] = 0, 0
 
-    def train_mod(self, epochs=100):
+    def _proc_epoch_rollout(self, obs_final, ep_ret, ep_len):
+        to_tensor = lambda x: torch.as_tensor(x, dtype=torch.float32, device=self.device)
+        for env_id in range(self.env.num_envs): 
+            if ep_len[env_id] > 0: 
+                val_terminal = self.ac_mod.get_terminal_value(to_tensor(obs_final), env_id)
+                ep_ret[env_id] += self.buf.terminate_ep(env_id, min(ep_len[env_id], self.steps_per_epoch), 
+                                                        val_terminal)
+        self.buf.terminate_epoch()
+    
+    def _train(self, obs_final, ep_ret, ep_len, epoch):
+        self._proc_epoch_rollout(obs_final, ep_ret, ep_len)
+        self._update_params(epoch)
+
+    def _log_ep_stats(self, epoch, ep_ret_list, ep_len_list):
+        if len(ep_ret_list) > 0:
+            total_steps_so_far = (epoch+1)*self.steps_per_epoch*self.env.num_envs
+            ep_len_np, ep_ret_np = np.array(ep_len_list), np.array(ep_ret_list)
+            self.writer.add_scalar('EpLen/mean', ep_len_np.mean(), total_steps_so_far)
+            self.writer.add_scalar('EpRet/mean', ep_ret_np.mean(), total_steps_so_far)
+            self.writer.add_scalar('EpRet/max', ep_ret_np.max(), total_steps_so_far)
+            self.writer.add_scalar('EpRet/min', ep_ret_np.min(), total_steps_so_far)
+        self.writer.add_scalar('VVals/mean', self.buf.val.mean(), epoch+1)
+        self.writer.add_scalar('VVals/max', self.buf.val.max(), epoch+1)
+        self.writer.add_scalar('VVals/min', self.buf.val.min(), epoch+1)
+        self.writer.flush()
+
+    def learn(self, epochs=100):
         # Initialize scheduler
         end_factor = self.lr_f/self.lr if self.lr_f is not None else 1.0
         ac_scheduler = LinearLR(self.ac_optim, start_factor=1.0, end_factor=end_factor, 
                                 total_iters=epochs)
+        to_tensor = lambda x: torch.as_tensor(x, dtype=torch.float32, device=self.device)
+        
+        # Normalize returns for more stable training
+        if not isinstance(self.env, NormalizeReward):
+            self.env = NormalizeReward(self.env, gamma=self.gamma)
 
         # Initialize environment variables
         obs, _ = self.env.reset(seed=self.seed)
         ep_len, ep_ret = np.zeros(self.env.num_envs, dtype=np.int64), np.zeros(self.env.num_envs)
-        ep_lens, ep_rets = [], []
+        ep_len_list, ep_ret_list = [], []
         autoreset = np.zeros(self.env.num_envs)
 
         for epoch in range(epochs):
             for step in range(self.steps_per_epoch):
-                act, val, logp = self.ac_mod.step(torch.as_tensor(obs, dtype=torch.float32, 
-                                                                  device=self.device))
+                act, val, logp = self.ac_mod.step(to_tensor(obs))
                 obs_next, rew, terminated, truncated, _ = self.env.step(act)
                 autoreset_next = np.logical_or(terminated, truncated)
                 ep_len += 1
@@ -233,22 +263,12 @@ class A2CTrainer:
                         self.buf.update_buffer(env_id, obs[env_id], act[env_id], rew[env_id], 
                                                val[env_id], logp[env_id], step)
                     if autoreset_next[env_id]:
-                        val_terminal = 0 if terminated[env_id] else self.ac_mod.get_terminal_value(
-                            torch.as_tensor(obs_next, dtype=torch.float32, device=self.device), env_id)
-                        ep_ret[env_id] += self.buf.terminate_ep(env_id, min(ep_len[env_id], step+1), val_terminal)
-                        ep_lens.append(ep_len[env_id])
-                        ep_rets.append(ep_ret)
-                        ep_len[env_id], ep_ret[env_id] = 0, 0
+                        val_terminal = 0 if terminated[env_id] else self.ac_mod.get_terminal_value(to_tensor(obs_next), env_id)
+                        self._proc_env_rollout(env_id, val_terminal, min(ep_len[env_id], step+1), 
+                                               ep_ret, ep_len, ep_ret_list, ep_len_list)
                 obs, autoreset = obs_next, autoreset_next
             
-            for env_id in range(self.env.num_envs): 
-                if ep_len[env_id] > 0: 
-                    val_terminal = self.ac_mod.get_terminal_value(torch.as_tensor(obs, dtype=torch.float32, 
-                                                                                  device=self.device), env_id)
-                    ep_ret[env_id] += self.buf.terminate_ep(env_id, min(ep_len[env_id], self.steps_per_epoch), 
-                                                            val_terminal)
-            self.buf.terminate_epoch()
-            self.__update_params(epoch)
+            self._train(obs, ep_ret, ep_len, epoch)
             ac_scheduler.step()
             
             if ((epoch + 1) % self.save_freq) == 0:
@@ -258,18 +278,8 @@ class A2CTrainer:
                 
             # Log info about epoch
             if ((epoch + 1) % self.eval_every) == 0:
-                if len(ep_rets) > 0:
-                    total_steps_so_far = (epoch+1)*self.steps_per_epoch*self.env.num_envs
-                    ep_lens, ep_rets = np.array(ep_lens), np.array(ep_rets)
-                    self.writer.add_scalar('EpLen/mean', ep_lens.mean(), total_steps_so_far)
-                    self.writer.add_scalar('EpRet/mean', ep_rets.mean(), total_steps_so_far)
-                    self.writer.add_scalar('EpRet/max', ep_rets.max(), total_steps_so_far)
-                    self.writer.add_scalar('EpRet/min', ep_rets.min(), total_steps_so_far)
-                    ep_lens, ep_rets = [], []
-                self.writer.add_scalar('VVals/mean', self.buf.val.mean(), epoch+1)
-                self.writer.add_scalar('VVals/max', self.buf.val.max(), epoch+1)
-                self.writer.add_scalar('VVals/min', self.buf.val.min(), epoch+1)
-                self.writer.flush()
+                self._log_ep_stats(epoch, ep_ret_list, ep_len_list)
+                ep_len_list, ep_ret_list = [], []
         
         # Save final model
         torch.save(self.ac_mod, os.path.join(self.save_dir, 'model.pt'))
@@ -296,6 +306,7 @@ def get_parser():
     parser.add_argument('--out_channels', nargs='+', type=int, default=[32, 64, 64])
     parser.add_argument('--kernel_sizes', nargs='+', type=int, default=[8, 4, 3])
     parser.add_argument('--strides', nargs='+', type=int, default=[4, 2, 1])
+    parser.add_argument('--padding', nargs='+', type=int, default=[0, 0, 0])
     parser.add_argument('--features_out', nargs='+', type=int, default=[512])
     parser.add_argument('--log_std_init', nargs='+', type=float, default=[0]) # Used for MLP too
 
@@ -349,6 +360,7 @@ if __name__ == '__main__':
                          out_channels=args.out_channels,
                          kernel_sizes=args.kernel_sizes, 
                          strides=args.strides, 
+                         padding=args.padding,
                          features_out=args.features_out,
                          log_std_init=args.log_std_init)
         env_fn_def = lambda render_mode=None: gym.make(args.env, max_episode_steps=max_ep_len, 
@@ -372,4 +384,4 @@ if __name__ == '__main__':
                          clip_grad=args.clip_grad, train_iters=args.train_iters, log_dir=log_dir, 
                          save_freq=args.save_freq, checkpoint_freq=args.checkpoint_freq)
     
-    trainer.train_mod(args.epochs)
+    trainer.learn(epochs=args.epochs)

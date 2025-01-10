@@ -7,7 +7,7 @@ from gymnasium.core import Env
 import numpy as np
 import torch
 import gymnasium as gym
-from gymnasium.wrappers import RescaleAction
+from gymnasium.wrappers import RescaleAction, ClipAction
 
 from core.rl_utils import load_env
 
@@ -92,8 +92,8 @@ if __name__ == '__main__':
         env = gym.make(args.env, render_mode=render_mode)
 
     if isinstance(env.action_space, gym.spaces.Box): 
-        env = RescaleAction(env, min_action=-1.0, max_action=1.0) 
-    _ = env.reset(seed=args.seed)
+        env = ClipAction(RescaleAction(env, min_action=-1.0, max_action=1.0)) 
+    env.reset(seed=args.seed)
 
     # Initialize video recorder if needed
     if args.record == True:

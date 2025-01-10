@@ -11,21 +11,21 @@ from torch.distributions.normal import Normal
 
 from .mlp import init_weights
 from .cnn import CNNActor as CNNLSTMActor
+from core.utils import match_to_list
 
 class FeatureExtractor(nn.Module):
-    def __init__(self, obs_dim, in_channels, out_channels, kernel_sizes, strides, features_out):
+    def __init__(self, obs_dim, in_channels, out_channels, kernel_sizes, 
+                 strides, padding, features_out):
         super().__init__()
         self.img_dim = obs_dim[-2:]
         self.in_channels = in_channels
         self.features_out = features_out[-1] if isinstance(features_out, list) else features_out
 
         # Make sure that length of kernel_sizes and strides are equal to out_channels
-        if not isinstance(kernel_sizes, list):
-            kernel_sizes = [kernel_sizes] * len(out_channels)
-            strides = [strides] * len(out_channels)
-        elif len(kernel_sizes) < len(out_channels):
-            kernel_sizes = [kernel_sizes[0]] * len(out_channels)
-            strides = [strides[0]] * len(out_channels)
+        if not isinstance(out_channels, list): out_channels = [out_channels]
+        kernel_sizes = match_to_list(kernel_sizes, out_channels)
+        strides = match_to_list(strides, out_channels)
+        padding = match_to_list(padding, out_channels)
 
         # Initialize all convolutional layers
         self.net = nn.Sequential()
@@ -33,7 +33,8 @@ class FeatureExtractor(nn.Module):
         for i in range(len(kernel_sizes)):
             self.net.add_module(f'fe_conv_{i+1}', nn.Conv2d(channels[i], channels[i+1], 
                                                             kernel_size=kernel_sizes[i],
-                                                            stride=strides[i], padding=0))
+                                                            stride=strides[i], 
+                                                            padding=padding[i]))
             self.net.add_module(f'fe_act_{i+1}', nn.ReLU())
         self.net.add_module('fe_flatten', nn.Flatten())
 
@@ -235,14 +236,14 @@ class CNNLSTMCritic(nn.Module):
               f'(1, {self.feature_ext.features_out})', '(1, 1)\n')
 
 class CNNLSTMActorCritic(nn.Module):
-    def __init__(self, env: VectorEnv, in_channels, out_channels, 
-                 kernel_sizes, strides, features_out, log_std_init):
+    def __init__(self, env: VectorEnv, in_channels, out_channels, kernel_sizes, 
+                 strides, padding, features_out, log_std_init):
         super().__init__()
         obs_dim = env.single_observation_space.shape
 
         # Initialize shared feature extractor
-        self.feature_ext = FeatureExtractor(obs_dim, in_channels, out_channels,
-                                            kernel_sizes, strides, features_out)
+        self.feature_ext = FeatureExtractor(obs_dim, in_channels, out_channels, kernel_sizes, 
+                                            strides, padding, features_out)
 
         # Determine action dimension from environment and initialize actor
         if isinstance(env.single_action_space, Discrete):
@@ -295,18 +296,17 @@ class CNNLSTMActorCritic(nn.Module):
     def reset_hidden_states(self, device, batch_size=1, batch_idx=None,
                             save=False, restore=False):
         if batch_idx is None:
-            if batch_idx is None:
-                if restore == True:
-                    for i, (c0, h0) in enumerate(zip(*self.hidden_state_stored)):
-                        self.feature_ext.lstm_c[i] = c0.clone()
-                        self.feature_ext.lstm_h[i] = h0.clone()
-                    return
-                if save == True:
-                    self.hidden_state_stored = [[], [], [], []]
-                    for c0, h0 in zip(self.feature_ext.lstm_c, self.feature_ext.lstm_h):
-                        self.hidden_state_stored[0].append(c0.clone())
-                        self.hidden_state_stored[1].append(h0.clone())
-                    return
+            if restore == True:
+                for i, (c0, h0) in enumerate(zip(*self.hidden_state_stored)):
+                    self.feature_ext.lstm_c[i] = c0.clone()
+                    self.feature_ext.lstm_h[i] = h0.clone()
+                return
+            if save == True:
+                self.hidden_state_stored = [[], []]
+                for c0, h0 in zip(self.feature_ext.lstm_c, self.feature_ext.lstm_h):
+                    self.hidden_state_stored[0].append(c0.clone())
+                    self.hidden_state_stored[1].append(h0.clone())
+                return
             
             self.feature_ext.reset_hidden_state_all(device, batch_size=batch_size)
         else:

@@ -61,7 +61,6 @@ def save_env(env_fn, wrappers_kwargs, save_dir, render_mode='human'):
 
 ''' Load a Gymnasium environment using Pickle '''
 def load_env(save_dir, render_mode='human'):
-    print(os.path.join(save_dir, 'env.pkl'))
     with open(os.path.join(save_dir, f'env_{str(render_mode)}.pkl'), 'rb') as f:
         state_dict = pickle.load(f)
     

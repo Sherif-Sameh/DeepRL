@@ -7,6 +7,7 @@ import torch
 from torch import nn
 
 from core.rl_utils import polyak_average
+from core.utils import match_to_list
 
 def init_weights(module, gain):
     if isinstance(module, nn.Linear):
@@ -19,10 +20,8 @@ class MLP(nn.Module):
         self.obs_dim = obs_dim
 
         # Make sure that length of hidden_sizes and hidden_acts is the same
-        if not isinstance(hidden_acts, list):
-            hidden_acts = [hidden_acts] * len(hidden_sizes)
-        elif len(hidden_acts) < len(hidden_sizes):
-            hidden_acts = [hidden_acts[0]] * len(hidden_sizes)
+        if not isinstance(hidden_sizes, list): hidden_sizes = [hidden_sizes]
+        hidden_acts = match_to_list(hidden_acts, hidden_sizes)
 
         # Initialize all hidden layers
         hidden_sizes = [obs_dim] + hidden_sizes

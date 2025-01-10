@@ -9,22 +9,21 @@ from torch import nn
 from torch.distributions import Normal
 
 from .mlp import init_weights, polyak_average
+from core.utils import match_to_list
 
 class FeatureExtractor(nn.Module):
-    def __init__(self, obs_dim, in_channels, out_channels, 
-                 kernel_sizes, strides, features_out):
+    def __init__(self, obs_dim, in_channels, out_channels, kernel_sizes, 
+                 strides, padding, features_out):
         super().__init__()
         self.img_dim = obs_dim[-2:]
         self.in_channels = in_channels
         self.features_out = features_out[-1] if isinstance(features_out, list) else features_out
 
-        # Make sure that length of kernel_sizes and strides are equal to out_channels
-        if not isinstance(kernel_sizes, list):
-            kernel_sizes = [kernel_sizes] * len(out_channels)
-            strides = [strides] * len(out_channels)
-        elif len(kernel_sizes) < len(out_channels):
-            kernel_sizes = [kernel_sizes[0]] * len(out_channels)
-            strides = [strides[0]] * len(out_channels)
+        # Make sure that length of kernel_sizes, strides and padding are equal to out_channels
+        if not isinstance(out_channels, list): out_channels = [out_channels]
+        kernel_sizes = match_to_list(kernel_sizes, out_channels)
+        strides = match_to_list(strides, out_channels)
+        padding = match_to_list(padding, out_channels)
 
         # Initialize all convolutional layers
         self.net = nn.Sequential()
@@ -32,7 +31,8 @@ class FeatureExtractor(nn.Module):
         for i in range(len(kernel_sizes)):
             self.net.add_module(f'fe_conv_{i+1}', nn.Conv2d(channels[i], channels[i+1], 
                                                             kernel_size=kernel_sizes[i],
-                                                            stride=strides[i], padding=0))
+                                                            stride=strides[i], 
+                                                            padding=padding[i]))
             self.net.add_module(f'fe_act_{i+1}', nn.ReLU())
         self.net.add_module('fe_flatten', nn.Flatten())
 
@@ -239,8 +239,9 @@ class CNNLSTMActor(nn.Module):
         print('\n')
     
 class CNNLSTMActorCritic(nn.Module):
-    def __init__(self, env: VectorEnv, in_channels, out_channels, kernel_sizes, 
-                 strides, features_out, hidden_sizes_actor, hidden_sizes_critic):
+    def __init__(self, env: VectorEnv, in_channels, out_channels, 
+                 kernel_sizes, strides, padding, features_out, 
+                 hidden_sizes_actor, hidden_sizes_critic):
         super().__init__()
         self.action_max = nn.Parameter(torch.tensor(env.single_action_space.high), 
                                        requires_grad=False)
@@ -253,8 +254,8 @@ class CNNLSTMActorCritic(nn.Module):
             raise NotImplementedError
         
         # Initialize the feature extractors, critics and actor
-        self.feature_ext = FeatureExtractor(obs_dim, in_channels, out_channels, 
-                                            kernel_sizes, strides, features_out)
+        self.feature_ext = FeatureExtractor(obs_dim, in_channels, out_channels, kernel_sizes, 
+                                            strides, padding, features_out)
         self.feature_ext_target = deepcopy(self.feature_ext)
         for param in self.feature_ext_target.parameters(): 
             param.requires_grad = False

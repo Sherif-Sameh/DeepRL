@@ -37,3 +37,16 @@ def clear_logs(log_dir):
                 os.remove(f)
             except Exception as e:
                 print(f'Failed to delete {f}. Reason {e}')
+
+''' Used to match the length of an input (can be of primative datatype or a list) 
+to a reference list'''
+def match_to_list(input, ref_list: list):
+    if not isinstance(input, list):
+        output = [input] * len(ref_list)
+    elif len(input) < len(ref_list):
+        output = [input[0]] * len(ref_list)
+    else:
+        output = input
+    
+    return output
+    
