@@ -2,16 +2,12 @@ import os
 import datetime
 import cv2
 from pathlib import Path
-from gymnasium.core import Env
 
 import numpy as np
 import torch
 import gymnasium as gym
 from gymnasium.wrappers import RescaleAction, ClipAction
-
 from core.rl_utils import load_env
-
-# Import all polcies (will look to do this in a cleaner manner in the future)
 
 class VideoRecorder(gym.Wrapper):
     def __init__(self, env, output_dir="./videos/", exp_name='', fps=30):
@@ -50,21 +46,7 @@ class VideoRecorder(gym.Wrapper):
         writer.release()
         print(f"Saved video: {video_path}")
 
-if __name__ == '__main__':
-    import argparse
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--env', type=str, default='HalfCheetah-v5')
-    parser.add_argument('--use_gpu', action="store_true", default=False)
-    parser.add_argument('--run', type=str, default='')
-    parser.add_argument('--itr', type=int, default=-1)
-    parser.add_argument('--seed', '-s', type=int, default=0)
-    parser.add_argument('--deterministic', action="store_true", default=False)
-    parser.add_argument('--num_episodes', type=int, default=100)
-    parser.add_argument('--record', action="store_true", default=False)
-    parser.add_argument('--video_dir', type=str, default='../video/')
-    parser.add_argument('--video_fps', type=int, default=30)
-    args = parser.parse_args()
-    
+def setup_env_and_model(args):
     # Load the saved model
     model_name = 'model.pt' if args.itr < 0 else f'model{args.itr}.pt'
     model_path = os.path.join(args.run, f'pyt_save/{model_name}')
@@ -102,6 +84,29 @@ if __name__ == '__main__':
         current_script_dir = os.path.dirname(os.path.abspath(__file__))
         video_dir = os.path.join(current_script_dir, args.video_dir, f'{env_name}')
         env = VideoRecorder(env, video_dir, exp_name=exp_name, fps=args.video_fps)
+    
+    return env, model, device
+
+def get_parser():
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--env', type=str, default='HalfCheetah-v5')
+    parser.add_argument('--use_gpu', action="store_true", default=False)
+    parser.add_argument('--run', type=str, default='')
+    parser.add_argument('--itr', type=int, default=-1)
+    parser.add_argument('--seed', '-s', type=int, default=0)
+    parser.add_argument('--deterministic', action="store_true", default=False)
+    parser.add_argument('--num_episodes', type=int, default=100)
+    parser.add_argument('--record', action="store_true", default=False)
+    parser.add_argument('--video_dir', type=str, default='../video/')
+    parser.add_argument('--video_fps', type=int, default=30)
+
+    return parser
+
+if __name__ == '__main__':
+    parser = get_parser()
+    args = parser.parse_args()
+    env, model, device = setup_env_and_model(args)
 
     # Run policy in environment for the set number of episodes
     for ep in range(args.num_episodes):

@@ -3,13 +3,10 @@ import sys
 import gymnasium as gym
 from gymnasium.spaces import Discrete, Box
 from gymnasium.wrappers import FrameStackObservation, GrayscaleObservation
-from gymnasium.wrappers import  AddRenderObservation, ResizeObservation
-from gymnasium.wrappers.vector import NormalizeReward
 import numpy as np
 import torch
 import torch.nn.functional as F
 from torch.optim import Adam
-from torch.optim.lr_scheduler import LinearLR
 
 from core.ppo.train import PPOTrainer
 from core.ppo.train import get_parser as get_parser_ppo
@@ -17,17 +14,40 @@ from core.td3.train import TD3Trainer
 from core.td3.train import get_parser as get_parser_td3
 from core.ppo.models.cnn_lstm import CNNLSTMActorCritic as PPOActorCritic
 from core.td3.models.cnn_lstm import CNNLSTMActorCritic as TD3ActorCritic
-from exploration.cdesp.models.icm import IntrinsicCuriosityModule
 from core.rl_utils import SkipAndScaleObservation
 
+from exploration.cdesp.models.icm import IntrinsicCuriosityModule
+from exploration.cdesp.icm_wrapper import IntrinsicRewardWrapper
+from exploration.utils import is_vizdoom_env
+from exploration.rl_utils import VizdoomToGymnasium
+
 class CDESPTrainer:
-    def __init__(self, env, rew_icm_max, fwd_coeff, icm_kwargs=dict()):
+    def __init__(self, env, fwd_coeff, target_window, auto_beta, explor_coeff, 
+                 explor_coeff_f, max_grad_norm_icm, lr_icm, icm_kwargs=dict()):
         self.fwd_coeff = fwd_coeff
-        self.rew_icm_max = rew_icm_max
+        self.ret_ext = [0] * target_window
+        self.ret_ext_min = 0
+        self.auto_beta = auto_beta
+        self.explor_coeff = explor_coeff
+        self.explor_coeff_diff = explor_coeff_f - explor_coeff
+        self.max_grad_norm_icm = max_grad_norm_icm
         
         # Initialize ICM module
         self.icm_mod = IntrinsicCuriosityModule(env, **icm_kwargs)
         self.icm_mod.layer_summary()
+
+        # Initialize SGD optimizer for ICM's parameters 
+        self.icm_optim = Adam([
+            {'params': self.icm_mod.inv_mod.parameters()},
+            {'params': self.icm_mod.fwd_mod.parameters()},
+            {'params': self.icm_mod.log_beta_multiplier, 'lr': 1e-2}
+        ], lr=lr_icm)
+        
+        # Determine inverse model loss function based on environment action space type
+        if isinstance(env.single_action_space, Discrete):
+            self.inv_loss = self._calc_inv_loss_discrete
+        elif isinstance(env.single_action_space, Box):
+            self.inv_loss = self._calc_inv_loss_cont
 
     def _get_icm_loss_mask(self, loss_mask: torch.Tensor):
         # A valid transition for ICM is where both observations are sampled
@@ -63,354 +83,160 @@ class CDESPTrainer:
         loss_mask_icm = self._get_icm_loss_mask(loss_mask)
 
         return F.mse_loss(features_pred[loss_mask_icm], 
-                          features_target[loss_mask_icm])
+                          features_target[loss_mask_icm]) * features.shape[-1]
+    
+    def _calc_beta_loss(self, beta_0: torch.Tensor, rew_mean: torch.Tensor, 
+                        target_rew_mean: torch.Tensor):
+        beta = self.icm_mod.get_beta().detach()
+
+        return (self.icm_mod.log_beta_multiplier * ((beta/beta_0) * rew_mean - target_rew_mean))
+    
+    def _step_icm_params(self, obs: torch.Tensor, act: torch.Tensor, 
+                         mask: torch.Tensor):    
+        # Get inverse and forward model losses
+        self.icm_optim.zero_grad()
+        loss_inv, features = self.inv_loss(obs, act, mask)
+        loss_fwd = self._calc_fwd_loss(features, act, mask)
+        loss_fwd = torch.tensor(0) if torch.isnan(loss_fwd) else loss_fwd
+
+        # Combine losses and update parameters
+        loss_icm = loss_inv + self.fwd_coeff * loss_fwd
+        loss_icm.backward()
+        torch.nn.utils.clip_grad_norm_(self.icm_mod.fwd_mod.parameters(), 
+                                       max_norm=self.max_grad_norm_icm)
+        self.icm_optim.step()
+
+        return loss_inv.item(), loss_fwd.item()
+
+    def _step_icm_beta(self, beta_0: torch.Tensor, ret_mean: torch.Tensor, 
+                       ret_mean_ext: torch.Tensor):
+        target_rew_mean = self.explor_coeff * ret_mean_ext
+        if (self.auto_beta == True) and (target_rew_mean > 0):
+            self.icm_optim.zero_grad()
+            loss_beta = self._calc_beta_loss(beta_0, ret_mean, target_rew_mean)
+            loss_beta.backward()
+            self.icm_optim.step()
+        else:
+            loss_beta = torch.tensor(0)
+        
+        return loss_beta.item()
+    
+    def _step_exploration_coeff(self, epochs_total):
+        self.explor_coeff += (self.explor_coeff_diff/(epochs_total+1))
 
 class CDESP_PPOTrainer(CDESPTrainer, PPOTrainer):
-    def __init__(self, rew_icm_max=1.0, fwd_coeff=0.2, lr_icm=1e-3, 
+    def __init__(self, fwd_coeff=0.25, target_window=10, auto_beta=True, explor_coeff=1.0, 
+                 explor_coeff_f=0.0, rew_icm_max=1.0, max_grad_norm_icm=0.5, lr_icm=1e-3, 
                  icm_kwargs=dict(), **ppo_args):
         # Initialize actor-critic trainer
         PPOTrainer.__init__(self, **ppo_args)
         
         # Initialize CDESP trainer and ICM module
-        CDESPTrainer.__init__(self, self.env, rew_icm_max, fwd_coeff, icm_kwargs)
+        CDESPTrainer.__init__(self, self.env, fwd_coeff, target_window, auto_beta, 
+                              explor_coeff, explor_coeff_f, max_grad_norm_icm, lr_icm, 
+                              icm_kwargs)
         self.icm_mod.to(self.device)
 
-        # Re-initialize common optimizer with added modules from ICM
-        self.ac_optim = Adam([{'params': self.ac_mod.parameters(), 'lr': self.lr},
-                              {'params': self.icm_mod.fwd_mod.parameters(), 'lr': lr_icm},
-                              {'params': self.icm_mod.inv_mod.parameters(), 'lr': lr_icm/2}])
-
-        # Determine inverse model loss function based on environment action space type
-        if isinstance(self.env.single_action_space, Discrete):
-            self.inv_loss = self._calc_inv_loss_discrete
-        elif isinstance(self.env.single_action_space, Box):
-            self.inv_loss = self._calc_inv_loss_cont
+        # Wrap environment with ICM reward wrapper
+        self.env = IntrinsicRewardWrapper(rew_icm_max, self.env, self.icm_mod, self.device)
+        self.ep_ret_icm_list = []
     
-    def _update_params(self, epoch):
-        # Store old policy and all observations for KL early stopping
-        obs_all = self.buf.get_all_obs(self.device) # Returns a tuple (obs, mask) for LSTM policies
-        self.ac_mod.reset_hidden_states(self.device, batch_size=self.env.num_envs)
-        with torch.no_grad(): self.ac_mod.actor.forward(obs_all[0])
-        pi_curr = self.ac_mod.actor.copy_policy()
+    def _train(self, epoch):
+        # Update actor-critic's parameters
+        super()._train(epoch)
 
-        # Loop train_iters times over the whole dataset (unless early stopping occurs)
-        kls = []
-        for i in range(self.train_iters):
-            # Get dataloader for performing mini-batch SGD updates
-            dataloader = self.buf.get_dataloader(self.device)
-            
-            # Loop over dataset in mini-batches
-            for obs, act, adv, logp, rtg, mask in dataloader:
-                self.ac_optim.zero_grad()
-                
-                # Normalize advantages mini-batch wise
-                adv_mean, adv_std = adv.mean(), adv.std()
-                adv = (adv - adv_mean) / adv_std
-
-                # Get policy, entropy and value losses
-                self.ac_mod.reset_hidden_states(self.device, batch_size=obs.shape[0])
-                loss_pi = self._calc_policy_loss(obs, act, adv, logp, loss_mask=mask)
-                loss_ent = self._calc_entropy_loss(loss_mask=mask)
-                self.ac_mod.reset_hidden_states(self.device, batch_size=self.buf.batch_size)
-                loss_val = self._calc_val_loss(obs, rtg, loss_mask=mask)
-
-                # Get inverse and forward model losses
-                loss_inv, features = self.inv_loss(obs, act, mask)
-                loss_fwd = self._calc_fwd_loss(features, act, mask)
-
-                # Combine losses and compute gradients
-                loss_ac = loss_pi + self.ent_coeff * loss_ent + self.vf_coeff * loss_val
-                loss_icm = loss_inv + self.fwd_coeff * loss_fwd
-                loss_ac.backward()
-                loss_icm.backward()
-
-                # Clip gradients (if required) and update parameters
-                if self.clip_grad == True:
-                    torch.nn.utils.clip_grad_norm_(self.ac_mod.parameters(), self.max_grad_norm)
-                self.ac_optim.step()
-
-            # Check KL-Divergence constraint for triggering early stopping
-            self.ac_mod.reset_hidden_states(self.device, batch_size=self.env.num_envs)
-            with torch.no_grad(): kl = self.ac_mod.actor.kl_divergence(obs_all, pi_curr)
-            kls.append(kl.item())
-            if (self.target_kl is not None) and (kl > 1.5 * self.target_kl):
-                # print(f'Actor updates cut-off after {i+1} iterations by KL {kl}')
-                break
-
-        # Log epoch statistics
-        self.writer.add_scalar('Loss/LossPi', loss_pi.item(), epoch+1)
-        self.writer.add_scalar('Loss/LossEnt', loss_ent.item(), epoch+1)
-        self.writer.add_scalar('Loss/LossV', loss_val.item(), epoch+1)
-        self.writer.add_scalar('Loss/LossInv', loss_inv.item(), epoch+1)
-        self.writer.add_scalar('Loss/LossFwd', loss_fwd.item(), epoch+1)
-        self.writer.add_scalar('Pi/KL', np.mean(kls), epoch+1)
-
-    def train_mod(self, epochs=100):
-        # Initialize scheduler
-        end_factor = self.lr_f/self.lr if self.lr_f is not None else 1.0
-        ac_scheduler = LinearLR(self.ac_optim, start_factor=1.0, end_factor=end_factor, 
-                                total_iters=epochs)
-        to_tensor = lambda x: torch.as_tensor(x, dtype=torch.float32, device=self.device)
-
-        # Normalize returns for more stable training
-        if not isinstance(self.env, NormalizeReward):
-            self.env = NormalizeReward(self.env, gamma=self.gamma)
-        self._run_env(num_episodes=10)
-
-        # Initialize environment variables
-        obs, _ = self.env.reset(seed=self.seed)
-        ep_len, ep_ret = np.zeros(self.env.num_envs, dtype=np.int64), np.zeros(self.env.num_envs)
-        ep_lens, ep_rets = [], []
-        autoreset = np.zeros(self.env.num_envs)
-        self.ac_mod.reset_hidden_states(self.device, batch_size=self.env.num_envs)
-
-        # Initialize ICM-specific variables
-        ep_ret_icm = np.zeros_like(ep_ret)
-        clipped_rew_icm = 0
-        steps_per_update = self.eval_every * self.steps_per_epoch * self.env.num_envs
-
-        for epoch in range(epochs):
-            for step in range(self.steps_per_epoch):
-                act, val, logp = self.ac_mod.step(to_tensor(obs))
-                obs_next, rew, terminated, truncated, _ = self.env.step(act)
-                rew_icm = self.icm_mod.calc_reward(to_tensor(obs), to_tensor(obs_next),
-                                                   to_tensor(act))
-                rew_to_clip = rew_icm > self.rew_icm_max
-                rew_icm[rew_to_clip] = self.rew_icm_max
-                autoreset_next = np.logical_or(terminated, truncated)
-                ep_len += 1
-
-                for env_id in range(self.env.num_envs):
-                    if not autoreset[env_id]: 
-                        rew[env_id] += rew_icm[env_id]
-                        ep_ret_icm[env_id] += rew_icm[env_id]
-                        clipped_rew_icm += rew_to_clip[env_id]
-                        self.buf.update_buffer(env_id, obs[env_id], act[env_id], rew[env_id], 
-                                               val[env_id], logp[env_id], step)
-                    if autoreset_next[env_id]:
-                        val_terminal = 0 if terminated[env_id] else self.ac_mod.get_terminal_value(
-                            to_tensor(obs_next), env_id)
-                        ep_ret[env_id] += self.buf.terminate_ep(env_id, min(ep_len[env_id], step+1), val_terminal)
-                        ep_ret[env_id] *= np.sqrt(self.env.return_rms.var + self.env.epsilon)
-                        ep_lens.append(ep_len[env_id])
-                        # ep_rets.append(ep_ret[env_id] - ep_ret_icm[env_id])
-                        ep_rets.append(ep_ret[env_id])
-                        ep_len[env_id], ep_ret[env_id], ep_ret_icm[env_id] = 0, 0, 0
-                        self.ac_mod.reset_hidden_states(self.device, batch_idx=env_id)
-                obs, autoreset = obs_next, autoreset_next
-
-            self.ac_mod.reset_hidden_states(self.device, save=True)
-            for env_id in range(self.env.num_envs): 
-                if ep_len[env_id] > 0: 
-                    val_terminal = self.ac_mod.get_terminal_value(to_tensor(obs), env_id)
-                    ep_ret[env_id] += self.buf.terminate_ep(env_id, min(ep_len[env_id], self.steps_per_epoch), 
-                                                            val_terminal)
-            self.buf.terminate_epoch()
-            self._update_params(epoch)
-            ac_scheduler.step()
-            self.ac_mod.reset_hidden_states(self.device, restore=True)
-            
-            if ((epoch + 1) % self.save_freq) == 0:
-                torch.save(self.ac_mod, os.path.join(self.save_dir, 'model.pt'))
-            if ((epoch + 1) % self.checkpoint_freq) == 0:
-                torch.save(self.ac_mod, os.path.join(self.save_dir, f'model{epoch+1}.pt'))
-                
-            # Log info about epoch
-            if ((epoch + 1) % self.eval_every) == 0:
-                if len(ep_rets) > 0:
-                    total_steps_so_far = (epoch+1)*self.steps_per_epoch*self.env.num_envs
-                    ep_lens, ep_rets = np.array(ep_lens), np.array(ep_rets)
-                    ratio_clipped_rew_icm = clipped_rew_icm/steps_per_update
-                    self.writer.add_scalar('EpLen/mean', ep_lens.mean(), total_steps_so_far)
-                    self.writer.add_scalar('EpRet/mean', ep_rets.mean(), total_steps_so_far)
-                    self.writer.add_scalar('EpRet/max', ep_rets.max(), total_steps_so_far)
-                    self.writer.add_scalar('EpRet/min', ep_rets.min(), total_steps_so_far)
-                    ep_lens, ep_rets = [], []
-                self.writer.add_scalar('VVals/mean', self.buf.val.mean(), epoch+1)
-                self.writer.add_scalar('VVals/max', self.buf.val.max(), epoch+1)
-                self.writer.add_scalar('VVals/min', self.buf.val.min(), epoch+1)
-                self.writer.add_scalar('ClippedRewRatio', ratio_clipped_rew_icm, epoch+1)
-                self.writer.flush()
-                clipped_rew_icm = 0
+        # Calculate extrinsic and current intrinsic returns
+        self.ret_ext.append(np.mean(self.ep_ret_list)); self.ret_ext.pop(0)
+        self.ret_ext_min = min(self.ret_ext_min, self.ret_ext[-1])
+        ret_mean_ext = torch.tensor(np.mean(self.ret_ext) - self.ret_ext_min)
+        ret_mean = torch.tensor(np.mean(self.ep_ret_icm_list))
         
-        # Save final model
-        torch.save(self.ac_mod, os.path.join(self.save_dir, 'model.pt'))
-        self.writer.close()
-        self.env.close()
-        print(f'Model {epochs} (final) saved successfully')
+        # Update ICM's parameters
+        beta_0 = self.icm_mod.get_beta().detach()
+        dataloader = self.buf.get_dataloader(self.device)
+        for obs, act, _, _, _, mask in dataloader:
+            loss_inv, loss_fwd = self._step_icm_params(obs, act, mask)
+            loss_beta = self._step_icm_beta(beta_0, ret_mean, ret_mean_ext)
+        self._step_exploration_coeff(self.epochs)
+                 
+        # Log epoch statistics for ICM losses
+        self.writer.add_scalar('Loss/LossInv', loss_inv, epoch+1)
+        self.writer.add_scalar('Loss/LossFwd', loss_fwd, epoch+1)
+        self.writer.add_scalar('Loss/LossBeta', loss_beta, epoch+1)
+
+    def _proc_env_rollout(self, env_id, val_terminal, rollout_len, ep_ret, ep_len):
+        super()._proc_env_rollout(env_id, val_terminal, rollout_len, ep_ret, ep_len)
+        
+        # Get and store sum of intrinsic rewards from wrapper
+        ep_ret_icm, ep_ret = self.env.env.get_and_clear_return(env_id)
+        self.ep_ret_icm_list.append(ep_ret_icm)
+        
+        # Replace combined return with extrinsic return
+        self.ep_ret_list[-1] = ep_ret
+
+    def _log_ep_stats(self, epoch):
+        super()._log_ep_stats(epoch)
+        ep_ret_icm_np = np.array(self.ep_ret_icm_list)
+        self.writer.add_scalar('EpRetICM/mean', ep_ret_icm_np.mean(), epoch+1)
+        self.ep_ret_icm_list = []
 
 class CDESP_TD3Trainer(CDESPTrainer, TD3Trainer):
-    def __init__(self, rew_icm_max=1.0, fwd_coeff=0.2, lr_icm=1e-3, 
+    def __init__(self, fwd_coeff=0.25, target_window=10, auto_beta=True, explor_coeff=1.0, 
+                 explor_coeff_f=0.0, rew_icm_max=1.0, max_grad_norm_icm=0.5, lr_icm=1e-3, 
                  icm_kwargs=dict(), **td3_args):
         # Initialize actor-critic trainer
         TD3Trainer.__init__(self, **td3_args)
         
         # Initialize CDESP trainer and ICM module
-        CDESPTrainer.__init__(self, self.env, rew_icm_max, fwd_coeff, icm_kwargs)
+        CDESPTrainer.__init__(self, self.env, fwd_coeff, target_window, auto_beta, 
+                              explor_coeff, explor_coeff_f, max_grad_norm_icm, lr_icm, 
+                              icm_kwargs)
         self.icm_mod.to(self.device)
 
-        # Re-initialize optimizer with added modules from ICM
-        self.ac_optim = Adam([{'params': self.ac_mod.parameters(), 'lr': self.lr},
-                              {'params': self.icm_mod.parameters(), 'lr': lr_icm}])
-        
-        # Choose inverse model loss function (always continuous)
-        self.inv_loss = self._calc_inv_loss_cont
+        # Wrap environment with ICM reward wrapper
+        self.env = IntrinsicRewardWrapper(rew_icm_max, self.env, self.icm_mod, self.device)
+        self.ep_ret_icm_list = []
     
-    def _update_params(self, epoch, update_policy):
-        # Get mini-batch from replay buffer
-        obs, act, rew, obs_next, done, mask = self.buf.get_batch(self.device)
-        
-        # Get critics loss
-        self.ac_optim.zero_grad()
-        loss_q1, loss_q2 = self._calc_q_loss(obs, act, rew, obs_next, done, mask)
-        
-        # Get inverse and forward model losses 
-        loss_inv, features = self.inv_loss(obs, act, mask)
-        loss_fwd = self._calc_fwd_loss(features, act, mask)
+    def _train(self, epoch):
+        # Update actor-critic's parameters
+        super()._train(epoch)
 
-        if update_policy == True:
-            # Get actor loss (critic's weights are frozen temporarily)
-            self.ac_mod.critic_1.set_grad_tracking(val=False)
-            loss_pi = self._calc_pi_loss(obs, mask)
-            self.ac_mod.critic_1.set_grad_tracking(val=True)
-
-            # Combine losses and calculate gradients
-            loss_ac = loss_pi + 0.5 * (loss_q1 + loss_q2)
-            loss_icm = loss_inv + self.fwd_coeff * loss_fwd
-            loss_ac.backward()
-            loss_icm.backward()
-
-            # Clip gradients (if neccessary and update parameters)
-            if self.clip_grad == True:
-                torch.nn.utils.clip_grad_norm_(self.ac_mod.actor.parameters(), self.max_grad_norm)
-            self.ac_optim.step()
-
-            # Update actor target network
-            self.ac_mod.actor.update_target(self.polyak)
-            
-            # Log training statistics
-            self.writer.add_scalar('Loss/LossPi', loss_pi.item(), epoch+1)
-        else:
-            loss_ac = 0.5 * (loss_q1 + loss_q2)
-            loss_icm = loss_inv + self.fwd_coeff * loss_fwd
-            loss_ac.backward()
-            loss_icm.backward()
-            self.ac_optim.step()
-        
-        # Update target critic networks
-        self.ac_mod.critic_1.update_target(self.polyak)
-        self.ac_mod.critic_2.update_target(self.polyak)
-
-        # Log training statistics
-        self.writer.add_scalar('Loss/LossQ1', loss_q1.item(), epoch+1)
-        self.writer.add_scalar('Loss/LossQ2', loss_q2.item(), epoch+1)
-        self.writer.add_scalar('Loss/LossInv', loss_inv.item(), epoch+1)
-        self.writer.add_scalar('Loss/LossFwd', loss_fwd.item(), epoch+1)
-
-    
-    def train_mod(self, epochs=100):
-        # Initialize scheduler
-        end_factor = self.lr_f/self.lr if self.lr_f is not None else 1.0
-        ac_scheduler = LinearLR(self.ac_optim, start_factor=1.0, end_factor=end_factor, 
-                                total_iters=epochs)
-        to_tensor = lambda x: torch.as_tensor(x, dtype=torch.float32, device=self.device)
-
-        # Normalize returns for more stable training
-        if not isinstance(self.env, NormalizeReward):
-            self.env = NormalizeReward(self.env, gamma=self.gamma)
-            
-        # Initialize environment variables
-        obs, _ = self.env.reset(seed=self.seed)
-        autoreset = np.zeros(self.env.num_envs)
-        self.ac_mod.reset_hidden_states(self.device, batch_size=self.env.num_envs)
-        q_vals = []
-
-        # Initialize ICM-specific variables
-        clipped_rew_icm = 0
-        steps_per_update = self.steps_per_epoch * self.env.num_envs
-
-        for epoch in range(epochs):
-            for step in range(self.steps_per_epoch):
-                if (step + self.steps_per_epoch*epoch) > self.start_steps:
-                    act, q_val = self.ac_mod.step(to_tensor(obs))
-                else:
-                    act = self.env.action_space.sample()
-                    _, q_val = self.ac_mod.step(to_tensor(obs))
-                obs_next, rew, terminated, truncated, _ = self.env.step(act)
-                rew_icm = self.icm_mod.calc_reward(to_tensor(obs), to_tensor(obs_next),
-                                                   to_tensor(act))
-                rew_to_clip = rew_icm > self.rew_icm_max
-                rew_icm[rew_to_clip] = self.rew_icm_max
-
-                for env_id in range(self.env.num_envs):
-                    if not autoreset[env_id]:
-                        rew[env_id] += rew_icm[env_id]
-                        clipped_rew_icm += rew_to_clip[env_id]
-                        self.buf.update_buffer(env_id, obs[env_id], act[env_id], 
-                                               rew[env_id], terminated[env_id])
-                        q_vals.append(q_val[env_id])
-                    else:
-                        self.buf.increment_ep_num(env_id)
-                        self.ac_mod.reset_hidden_states(self.device, batch_idx=env_id)
-                obs = obs_next
-                autoreset = np.logical_or(terminated, truncated)
+        # Calculate extrinsic and current intrinsic returns
+        self.ret_ext.append(np.mean(self.ep_ret_list)); self.ret_ext.pop(0)
+        self.ret_ext_min = min(self.ret_ext_min, self.ret_ext[-1])
+        ret_mean_ext = torch.tensor(np.mean(self.ret_ext) - self.ret_ext_min)
+        ret_mean = torch.tensor(np.mean(self.ep_ret_icm_list))
                 
-                if (self.buf.get_buffer_size() >= self.learning_starts) \
-                    and ((step % self.update_every) == 0):
-                    self.ac_mod.reset_hidden_states(self.device, save=True)
-                    for j in range(self.num_updates):
-                        update_policy = (j % self.policy_delay) == 0 
-                        self._update_params(epoch, update_policy)
-                    self.ac_mod.reset_hidden_states(self.device, restore=True)
-            
-            # Evaluate deterministic policy (skip return normalization wrapper)
-            env = self.env.env if isinstance(self.env, NormalizeReward) else self.env 
-            ep_len, ep_ret = np.zeros(env.num_envs), np.zeros(env.num_envs)
-            ep_lens, ep_rets = [], []
-            obs, _ = env.reset()
-            self.ac_mod.reset_hidden_states(self.device, batch_size=self.env.num_envs)
-            while len(ep_lens) < self.num_test_episodes*env.num_envs:
-                act = self.ac_mod.act(to_tensor(obs))
-                obs, rew, terminated, truncated, _ = env.step(act)
-                ep_len, ep_ret = ep_len + 1, ep_ret + rew
-                done = np.logical_or(terminated, truncated)
-                if np.any(done):
-                    for env_id in range(env.num_envs):
-                        if done[env_id]:
-                            ep_lens.append(ep_len[env_id])
-                            ep_rets.append(ep_ret[env_id])
-                            ep_len[env_id], ep_ret[env_id] = 0, 0
-                            self.ac_mod.reset_hidden_states(self.device, batch_idx=env_id)
-            obs, _ = self.env.reset()
-            ac_scheduler.step()
-            self.ac_mod.step_action_std(epochs)
-            self.ac_mod.reset_hidden_states(self.device, batch_size=self.env.num_envs)
+        # Update ICM's parameters
+        beta_0 = self.icm_mod.get_beta().detach()
+        obs, act, _, _, _, mask = self.buf.get_batch(self.device)
+        loss_inv, loss_fwd = self._step_icm_params(obs, act, mask)
+        loss_beta = self._step_icm_beta(beta_0, ret_mean, ret_mean_ext)
+        self._step_exploration_coeff(self.epochs)
 
-            if ((epoch + 1) % self.save_freq) == 0:
-                torch.save(self.ac_mod, os.path.join(self.save_dir, 'model.pt'))
-            if ((epoch + 1) % self.checkpoint_freq) == 0:
-                torch.save(self.ac_mod, os.path.join(self.save_dir, f'model{epoch+1}.pt'))
+        # Log epoch statistics for ICM losses
+        self.writer.add_scalar('Loss/LossInv', loss_inv, epoch+1)
+        self.writer.add_scalar('Loss/LossFwd', loss_fwd, epoch+1)
+        self.writer.add_scalar('Loss/LossBeta', loss_beta, epoch+1)
 
-            # Log info about epoch
-            total_steps_so_far = (epoch+1)*self.steps_per_epoch*self.env.num_envs
-            ep_lens, ep_rets, q_vals = np.array(ep_lens), np.array(ep_rets), np.array(q_vals)
-            ratio_clipped_rew_icm = clipped_rew_icm/steps_per_update
-            self.writer.add_scalar('EpLen/mean', ep_lens.mean(), total_steps_so_far)
-            self.writer.add_scalar('EpRet/mean', ep_rets.mean(), total_steps_so_far)
-            self.writer.add_scalar('EpRet/max', ep_rets.max(), total_steps_so_far)
-            self.writer.add_scalar('EpRet/min', ep_rets.min(), total_steps_so_far)
-            self.writer.add_scalar('QVals/mean', q_vals.mean(), epoch+1)
-            self.writer.add_scalar('QVals/max', q_vals.max(), epoch+1)
-            self.writer.add_scalar('QVals/min', q_vals.min(), epoch+1)
-            self.writer.add_scalar('ClippedRewRatio', ratio_clipped_rew_icm, epoch+1)
-            self.writer.flush()
-            q_vals, clipped_rew_icm = [], 0
-        
-        # Save final model
-        torch.save(self.ac_mod, os.path.join(self.save_dir, 'model.pt'))
-        self.writer.close()
-        self.env.close()
-        print(f'Model {epochs} (final) saved successfully')
+    def _proc_env_rollout(self, env_id, ep_len):
+        super()._proc_env_rollout(env_id, ep_len)
+
+        # Get and store sum of intrinsic rewards from wrapper
+        ep_ret_icm, _ = self.env.env.get_and_clear_return(env_id)
+        self.ep_ret_icm_list.append(ep_ret_icm)
+
+    def _eval(self):
+        # Disable intrinsic rewards for evaluation and re-enable them after
+        self.env.env.disable_intrinsic_reward()
+        super()._eval()
+        self.env.env.enable_intrinsic_reward()
+    
+    def _log_ep_stats(self, epoch, q_val_list):
+        super()._log_ep_stats(epoch, q_val_list)
+        ep_ret_icm_np = np.array(self.ep_ret_icm_list)
+        self.writer.add_scalar('EpRetICM/mean', ep_ret_icm_np.mean(), epoch+1)
+        self.ep_ret_icm_list = []
 
 def get_algo_type():
     import argparse
@@ -433,14 +259,22 @@ if __name__ == '__main__':
         parser = get_parser_td3()
 
     # ICM parameters
-    parser.add_argument('--beta', type=float, default=0.02)
+    parser.add_argument('--beta', type=float, default=1e-5)
+    parser.add_argument('--auto_beta', action="store_true", default=False)
     parser.add_argument('--hid_inv', nargs='+', type=int, default=[256])
     parser.add_argument('--hid_fwd', nargs='+', type=int, default=[256])
 
     # Rest of training parameters
     parser.add_argument('--fwd_coeff', type=float, default=0.25)
-    parser.add_argument('--rew_icm_max', type=float, default=1.0)
+    parser.add_argument('--target_window', type=int, default=10)
+    parser.add_argument('--explor_coeff', type=float, default=2.0)
+    parser.add_argument('--explor_coeff_f', type=float, default=0)
+    parser.add_argument('--rew_icm_max', type=float, default=None)
+    parser.add_argument('--max_grad_norm_icm', type=float, default=0.5)
     parser.add_argument('--lr_icm', type=float, default=1e-3)
+
+    # Miniworld specific arguments
+    parser.add_argument('--vizdoom_obs_size', type=int, default=42)
 
     args = parser.parse_args(remaining_args)
     args.exp_name = 'cdesp_'+ args.exp_name
@@ -483,25 +317,33 @@ if __name__ == '__main__':
                       hidden_size_inv=args.hid_inv,
                       hidden_sizes_fwd=args.hid_fwd)
     
-    # Setup environment lambda 
-    # env_fn_def = lambda render_mode=None: gym.make(args.env, max_episode_steps=max_ep_len, 
-    #                                                    render_mode=render_mode)
-    env_fn_def = lambda render_mode='rgb_array': ResizeObservation(AddRenderObservation(
-        gym.make(args.env, max_episode_steps=max_ep_len, render_mode=render_mode)), shape=(42, 42))
-    env_fn = [lambda render_mode='rgb_array': FrameStackObservation(SkipAndScaleObservation(
+    # Setup environment lambda
+    if is_vizdoom_env(args.env):
+        env_fn_def = lambda render_mode=None: VizdoomToGymnasium(
+            gym.make(args.env, render_mode=render_mode, max_episode_steps=max_ep_len),
+            img_size=args.vizdoom_obs_size)
+    else:
+        env_fn_def = lambda render_mode=None: gym.make(args.env, render_mode=render_mode, 
+                                                       max_episode_steps=max_ep_len)
+    env_fn = [lambda render_mode=None: FrameStackObservation(SkipAndScaleObservation(
         GrayscaleObservation(env_fn_def(render_mode=render_mode)), skip=args.action_rep), 
         stack_size=args.in_channels)] * args.cpu
     wrappers_kwargs = {
-        'ResizeObservation': {'shape': (42, 42)},
         'SkipAndScaleObservation': {'skip': args.action_rep},
         'FrameStackObservation': {'stack_size': args.in_channels}
     }
+    if is_vizdoom_env(args.env): 
+        wrappers_kwargs['VizdoomToGymnasium'] = {'img_size': args.vizdoom_obs_size}
 
     # Setup the trainer and begin training
     if algo == 'ppo':
-        trainer = CDESP_PPOTrainer(rew_icm_max=args.rew_icm_max, fwd_coeff=args.fwd_coeff, lr_icm=args.lr_icm,
-                                   icm_kwargs=icm_kwargs, env_fn=env_fn, wrappers_kwargs=wrappers_kwargs, 
-                                   use_gpu=args.use_gpu, model_path=args.model_path, ac=ac, ac_kwargs=ac_kwargs, 
+        trainer = CDESP_PPOTrainer(fwd_coeff=args.fwd_coeff, target_window=args.target_window, 
+                                   auto_beta=args.auto_beta, explor_coeff=args.explor_coeff, 
+                                   explor_coeff_f=args.explor_coeff_f, rew_icm_max=args.rew_icm_max, 
+                                   max_grad_norm_icm=args.max_grad_norm_icm, lr_icm=args.lr_icm, 
+                                   icm_kwargs=icm_kwargs, env_fn=env_fn, 
+                                   wrappers_kwargs=wrappers_kwargs, use_gpu=args.use_gpu, 
+                                   model_path=args.model_path, ac=ac, ac_kwargs=ac_kwargs, 
                                    seed=args.seed, steps_per_epoch=args.steps, eval_every=args.eval_every, 
                                    batch_size=args.batch_size, gamma=args.gamma, clip_ratio=args.clip_ratio, 
                                    lr=args.lr, lr_f=args.lr_f, ent_coeff=args.ent_coeff, 
@@ -511,9 +353,13 @@ if __name__ == '__main__':
                                    seq_prefix=args.seq_prefix, seq_stride=args.seq_stride, log_dir=log_dir, 
                                    save_freq=args.save_freq, checkpoint_freq=args.checkpoint_freq)
     elif algo == 'td3':
-        trainer = CDESP_TD3Trainer(rew_icm_max=args.rew_icm_max, fwd_coeff=args.fwd_coeff, lr_icm=args.lr_icm,
-                                   icm_kwargs=icm_kwargs, env_fn=env_fn, wrappers_kwargs=wrappers_kwargs, 
-                                   use_gpu=args.use_gpu, model_path=args.model_path, ac=ac, ac_kwargs=ac_kwargs, 
+        trainer = CDESP_TD3Trainer(fwd_coeff=args.fwd_coeff, target_window=args.target_window,
+                                   auto_beta=args.auto_beta, explor_coeff=args.explor_coeff, 
+                                   explor_coeff_f=args.explor_coeff_f, rew_icm_max=args.rew_icm_max, 
+                                   max_grad_norm_icm=args.max_grad_norm_icm, lr_icm=args.lr_icm, 
+                                   icm_kwargs=icm_kwargs, env_fn=env_fn, 
+                                   wrappers_kwargs=wrappers_kwargs, use_gpu=args.use_gpu, 
+                                   model_path=args.model_path, ac=ac, ac_kwargs=ac_kwargs, 
                                    seed=args.seed, steps_per_epoch=args.steps, buf_size=args.buf_size, 
                                    gamma=args.gamma, polyak=args.polyak, lr=args.lr, lr_f=args.lr_f, 
                                    max_grad_norm=args.max_grad_norm, clip_grad=args.clip_grad, 
@@ -525,4 +371,5 @@ if __name__ == '__main__':
                                    seq_prefix=args.seq_prefix, seq_stride=args.seq_stride, 
                                    log_dir=log_dir, save_freq=args.save_freq, 
                                    checkpoint_freq=args.checkpoint_freq)
-    trainer.train_mod(args.epochs)
+        
+    trainer.learn(args.epochs, ep_init=args.ep_init)

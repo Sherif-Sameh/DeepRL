@@ -3,3 +3,6 @@
 /*.sh
 **/__pycache__/
 /*.zip
+/_vizdoom/
+/*.ini
+/exploration/her/

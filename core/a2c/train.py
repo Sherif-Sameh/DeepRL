@@ -88,6 +88,7 @@ class A2CTrainer:
         self.seed = seed
         self.steps_per_epoch = steps_per_epoch
         self.eval_every = eval_every
+        self.epochs = None
         self.gamma = gamma
         self.lr = lr
         self.lr_f = lr_f
@@ -98,7 +99,8 @@ class A2CTrainer:
         self.train_iters = train_iters
         self.save_freq = save_freq
         self.checkpoint_freq = checkpoint_freq
-
+        self.ep_len_list, self.ep_ret_list = [], []
+        
         # Serialize local hyperparameters
         locals_dict = locals()
         locals_dict.pop('self'); locals_dict.pop('env_fn'); locals_dict.pop('wrappers_kwargs')
@@ -200,12 +202,11 @@ class A2CTrainer:
         self.writer.add_scalar('Loss/LossV', loss_val.item(), epoch+1)
         self.writer.add_scalar('Pi/KL', approx_kl, epoch+1)
 
-    def _proc_env_rollout(self, env_id, val_terminal, rollout_len, ep_ret, ep_len, 
-                          ep_ret_list: list, ep_len_list: list):
+    def _proc_env_rollout(self, env_id, val_terminal, rollout_len, ep_ret, ep_len):
         ep_ret[env_id] += self.buf.terminate_ep(env_id, rollout_len, val_terminal)
         ep_ret[env_id] *= np.sqrt(self.env.return_rms.var + self.env.epsilon)
-        ep_len_list.append(ep_len[env_id])
-        ep_ret_list.append(ep_ret[env_id])
+        self.ep_len_list.append(ep_len[env_id])
+        self.ep_ret_list.append(ep_ret[env_id])
         ep_len[env_id], ep_ret[env_id] = 0, 0
 
     def _proc_epoch_rollout(self, obs_final, ep_ret, ep_len):
@@ -217,14 +218,13 @@ class A2CTrainer:
                                                         val_terminal)
         self.buf.terminate_epoch()
     
-    def _train(self, obs_final, ep_ret, ep_len, epoch):
-        self._proc_epoch_rollout(obs_final, ep_ret, ep_len)
+    def _train(self, epoch):
         self._update_params(epoch)
 
-    def _log_ep_stats(self, epoch, ep_ret_list, ep_len_list):
-        if len(ep_ret_list) > 0:
+    def _log_ep_stats(self, epoch):
+        if len(self.ep_ret_list) > 0:
             total_steps_so_far = (epoch+1)*self.steps_per_epoch*self.env.num_envs
-            ep_len_np, ep_ret_np = np.array(ep_len_list), np.array(ep_ret_list)
+            ep_len_np, ep_ret_np = np.array(self.ep_len_list), np.array(self.ep_ret_list)
             self.writer.add_scalar('EpLen/mean', ep_len_np.mean(), total_steps_so_far)
             self.writer.add_scalar('EpRet/mean', ep_ret_np.mean(), total_steps_so_far)
             self.writer.add_scalar('EpRet/max', ep_ret_np.max(), total_steps_so_far)
@@ -232,10 +232,10 @@ class A2CTrainer:
         self.writer.add_scalar('VVals/mean', self.buf.val.mean(), epoch+1)
         self.writer.add_scalar('VVals/max', self.buf.val.max(), epoch+1)
         self.writer.add_scalar('VVals/min', self.buf.val.min(), epoch+1)
-        self.writer.flush()
 
     def learn(self, epochs=100, ep_init=10):
         # Initialize scheduler
+        self.epochs = epochs
         end_factor = self.lr_f/self.lr if self.lr_f is not None else 1.0
         ac_scheduler = LinearLR(self.ac_optim, start_factor=1.0, end_factor=end_factor, 
                                 total_iters=epochs)
@@ -250,7 +250,6 @@ class A2CTrainer:
         # Initialize environment variables
         obs, _ = self.env.reset()
         ep_len, ep_ret = np.zeros(self.env.num_envs, dtype=np.int64), np.zeros(self.env.num_envs)
-        ep_len_list, ep_ret_list = [], []
         autoreset = np.zeros(self.env.num_envs)
 
         for epoch in range(epochs):
@@ -266,11 +265,11 @@ class A2CTrainer:
                                                val[env_id], logp[env_id], step)
                     if autoreset_next[env_id]:
                         val_terminal = 0 if terminated[env_id] else self.ac_mod.get_terminal_value(to_tensor(obs_next), env_id)
-                        self._proc_env_rollout(env_id, val_terminal, min(ep_len[env_id], step+1), 
-                                               ep_ret, ep_len, ep_ret_list, ep_len_list)
+                        self._proc_env_rollout(env_id, val_terminal, min(ep_len[env_id], step+1), ep_ret, ep_len)
                 obs, autoreset = obs_next, autoreset_next
             
-            self._train(obs, ep_ret, ep_len, epoch)
+            self._proc_epoch_rollout(obs, ep_ret, ep_len)
+            self._train(epoch)
             ac_scheduler.step()
             
             if ((epoch + 1) % self.save_freq) == 0:
@@ -280,8 +279,9 @@ class A2CTrainer:
                 
             # Log info about epoch
             if ((epoch + 1) % self.eval_every) == 0:
-                self._log_ep_stats(epoch, ep_ret_list, ep_len_list)
-                ep_len_list, ep_ret_list = [], []
+                self._log_ep_stats(epoch)
+                self.ep_len_list, self.ep_ret_list = [], []
+                self.writer.flush()
         
         # Save final model
         torch.save(self.ac_mod, os.path.join(self.save_dir, 'model.pt'))

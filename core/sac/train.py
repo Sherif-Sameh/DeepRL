@@ -171,6 +171,7 @@ class SACTrainer:
         # Store needed hyperparameters
         self.seed = seed
         self.steps_per_epoch = steps_per_epoch
+        self.epochs = None
         self.gamma = gamma
         self.polyak = polyak
         self.lr = lr
@@ -186,6 +187,7 @@ class SACTrainer:
         self.num_test_episodes = num_test_episodes
         self.save_freq = save_freq
         self.checkpoint_freq = checkpoint_freq
+        self.ep_len_list, self.ep_ret_list = [0], [0]
         
         # Serialize local hyperparameters
         locals_dict = locals()
@@ -372,29 +374,27 @@ class SACTrainer:
         # Evaluate deterministic policy (skip return normalization wrapper)
         env = self.env.env if isinstance(self.env, NormalizeReward) else self.env 
         ep_len, ep_ret = np.zeros(env.num_envs), np.zeros(env.num_envs)
-        ep_len_list, ep_ret_list = [], []
+        self.ep_len_list, self.ep_ret_list = [], []
         to_tensor = lambda x: torch.as_tensor(x, dtype=torch.float32, device=self.device)
         
         obs, _ = env.reset()
         self.ac_mod.reset_hidden_states(self.device, batch_size=self.env.num_envs)
-        while len(ep_len_list) < self.num_test_episodes*env.num_envs:
+        while len(self.ep_len_list) < self.num_test_episodes*env.num_envs:
             act = self.ac_mod.act(to_tensor(obs), deterministic=True)
             obs, rew, terminated, truncated, _ = env.step(act)
             ep_len, ep_ret = ep_len + 1, ep_ret + rew
             done = np.logical_or(terminated, truncated)
             for env_id in range(env.num_envs):
                 if done[env_id]:
-                    ep_len_list.append(ep_len[env_id])
-                    ep_ret_list.append(ep_ret[env_id])
+                    self.ep_len_list.append(ep_len[env_id])
+                    self.ep_ret_list.append(ep_ret[env_id])
                     ep_len[env_id], ep_ret[env_id] = 0, 0
                     self.ac_mod.reset_hidden_states(self.device, batch_idx=env_id)
         self.ac_mod.reset_hidden_states(self.device, batch_size=self.env.num_envs)
-
-        return ep_len_list, ep_ret_list
     
-    def _log_ep_stats(self, epoch, ep_ret_list, ep_len_list, q_val_list):
+    def _log_ep_stats(self, epoch, q_val_list):
         total_steps_so_far = (epoch+1)*self.steps_per_epoch*self.env.num_envs
-        ep_len_np, ep_ret_np, q_val_np = np.array(ep_len_list), np.array(ep_ret_list), np.array(q_val_list)
+        ep_len_np, ep_ret_np, q_val_np = np.array(self.ep_len_list), np.array(self.ep_ret_list), np.array(q_val_list)
         self.writer.add_scalar('EpLen/mean', ep_len_np.mean(), total_steps_so_far)
         self.writer.add_scalar('EpRet/mean', ep_ret_np.mean(), total_steps_so_far)
         self.writer.add_scalar('EpRet/max', ep_ret_np.max(), total_steps_so_far)
@@ -403,10 +403,10 @@ class SACTrainer:
         self.writer.add_scalar('QVals/max', q_val_np.max(), epoch+1)
         self.writer.add_scalar('QVals/min', q_val_np.min(), epoch+1)
         self.writer.add_scalar('Alpha', self.alpha_mod.forward().item(), epoch+1)
-        self.writer.flush()
 
     def learn(self, epochs=100, ep_init=10):
         # Initialize scheduler
+        self.epochs = epochs
         end_factor = self.lr_f/self.lr if self.lr_f is not None else 1.0
         ac_scheduler = LinearLR(self.ac_optim, start_factor=1.0, end_factor=end_factor, 
                                 total_iters=epochs)
@@ -450,7 +450,7 @@ class SACTrainer:
                     and ((step % self.update_every) == 0):
                     self._train(epoch)
             
-            ep_len_list, ep_ret_list = self._eval()
+            self._eval()
             obs, _ = self.env.reset()
             ac_scheduler.step()
             alpha_scheduler.step()
@@ -461,8 +461,9 @@ class SACTrainer:
                 torch.save(self.ac_mod, os.path.join(self.save_dir, f'model{epoch+1}.pt'))
             
             # Log info about epoch
-            self._log_ep_stats(epoch, ep_ret_list, ep_len_list, q_val_list)
+            self._log_ep_stats(epoch, q_val_list)
             q_val_list = []
+            self.writer.flush()
         
         # Save final model
         torch.save(self.ac_mod, os.path.join(self.save_dir, 'model.pt'))

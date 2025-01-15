@@ -130,7 +130,8 @@ class IntrinsicCuriosityModule(nn.Module):
     def __init__(self, env: VectorEnv, beta, in_channels, out_channels, kernel_sizes, 
                  strides, padding, hidden_size_inv, hidden_sizes_fwd):
         super().__init__()
-        self.beta_2 = beta/2
+        self.beta = beta
+        self.log_beta_multiplier = nn.Parameter(torch.tensor([0.0]), requires_grad=True)
 
         # Extract needed parameters from environment and actor-critic
         obs_dim = env.single_observation_space.shape
@@ -147,17 +148,22 @@ class IntrinsicCuriosityModule(nn.Module):
         self.fwd_mod = ForwardModel(act_transform, self.inv_mod.feature_dim, 
                                     act_dim, hidden_sizes_fwd)
     
-    def calc_reward(self, obs, obs_next, act):
+    def calc_reward(self, obs, obs_next, act, device):
+        to_tensor = lambda x: torch.as_tensor(x, dtype=torch.float32, device=device)
         with torch.no_grad():
             # obs shape (batch_size, obs_dim)
+            obs, obs_next, act = to_tensor(obs), to_tensor(obs_next), to_tensor(act)
             features = self.inv_mod.feature_ext(obs)
             features_next = self.inv_mod.feature_ext(obs_next)
 
-            # intrinsic reward = beta/2 * SSD of feature prediction error
+            beta = self.get_beta()
             features_next_pred = self.fwd_mod.forward(features.unsqueeze(1), act.unsqueeze(1))
-            intrinsic_rew = self.beta_2 * torch.sum((features_next_pred.squeeze(1) - features_next)**2, dim=-1)
+            intrinsic_rew = beta * torch.sum((features_next_pred.squeeze(1) - features_next)**2, dim=-1)
 
             return intrinsic_rew.cpu().numpy()
+        
+    def get_beta(self):
+        return torch.exp(self.log_beta_multiplier) * self.beta
         
     def layer_summary(self):
         print('Inverse Model Summary: \n')
