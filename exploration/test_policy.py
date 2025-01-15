@@ -15,7 +15,8 @@ if __name__ == '__main__':
         if hasattr(model, 'reset_hidden_states'):
             model.reset_hidden_states(device)
         while not done:
-            # obs = obs[None, :]
+            if args.record == True:
+                env.render()
             act = model.act(torch.as_tensor(obs, dtype=torch.float32).to(device),
                             deterministic=args.deterministic)
             if act.dtype == np.int64: act = int(act) # Deals with a bug in Vizdoom

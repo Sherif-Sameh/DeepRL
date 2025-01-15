@@ -77,7 +77,6 @@ class A2CBuffer:
                 to_tensor(self.logp.reshape(-1)), \
                 to_tensor(self.rtg.reshape(-1))
                 
-
 class A2CTrainer:
     def __init__(self, env_fn, wrappers_kwargs=dict(), use_gpu=False, model_path='', 
                  ac=MLPActorCritic, ac_kwargs=dict(), seed=0, steps_per_epoch=1000, 
