@@ -1,8 +1,8 @@
 # Deep Reinforcement Learning
 <p align="center">
-  <img src="images/bipedal_walker.gif" alt="Bipedal Walker" height="130"/>
-  <img src="images/car_racing.gif" alt="Car Racing" height="130"/>
-  <img src="images/vizdoom.gif" alt="ViZDoom" height="130"/>
+  <img src="images/bipedal_walker.gif" alt="Bipedal Walker" height="150"/>
+  <img src="images/car_racing.gif" alt="Car Racing" height="150"/>
+  <img src="images/vizdoom.gif" alt="ViZDoom" height="150"/>
 </p>
 
 # Summary
@@ -105,10 +105,13 @@ https://doi.org/10.48550/arXiv.1705.05363))
 
 * OpenAI's [Spinning Up](https://spinningup.openai.com/en/latest/) which was my main source of information (in addition to the original papers) for learning about the core algorithms and Gym.  
 
-* The amazing book: [Dive into Deep Learning](https://d2l.ai/) by Zhang, Aston and Lipton, Zachary C. and Li, Mu and Smola, Alexander J. for Deep Learning using PyTorch.
-
 * Stable-Baselines3 ([SB3](https://stable-baselines3.readthedocs.io/en/master/)) mainly for clearing up confusions regarding parameter sharing in on-policy algorithms and as a guide for default hyperparamter values. 
 
 * The amazing blogpost: [The 37 Implementation Details of Proximal Policy Optimization](https://iclr-blog-track.github.io/2022/03/25/ppo-implementation-details/#Andrychowicz) by Huang, et al. which dives into all the important details regarding PPO's implementation. 
+
+* The Generalized Advantage Estimation ([GAE](	
+https://doi.org/10.48550/arXiv.1506.02438)) paper and the Recurrent Replay Distributed DQN ([R2D2](https://openreview.net/forum?id=r1lyTjAqYX)) paper which cleared many confusions about recurrent policies in general. 
+
+* The amazing book: [Dive into Deep Learning](https://d2l.ai/) by Zhang, Aston and Lipton, Zachary C. and Li, Mu and Smola, Alexander J. for Deep Learning using PyTorch.
 
 * Note: All correspoding papers are linked with their algorithms above. Also, for SAC the link correponds to the 2nd paper that the implementation is based on and that describes automatic temperature coefficient adjustment using Dual Gradient Descent. Meanwhile, the original SAC paper can be found [here](https://arxiv.org/abs/1801.01290).
