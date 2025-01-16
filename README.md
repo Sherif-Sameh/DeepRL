@@ -55,7 +55,7 @@ This repository contains implementations of the majority of the core algorithms 
 * Advantage Actor-Critic ([A2C](	
 https://doi.org/10.48550/arXiv.1602.01783))
 
-* Trust Region Policy Gradient ([TRPO](	
+* Trust Region Policy Optimization ([TRPO](	
 https://doi.org/10.48550/arXiv.1502.05477))	
 
 * Proximal Policy Optimization ([PPO](	
