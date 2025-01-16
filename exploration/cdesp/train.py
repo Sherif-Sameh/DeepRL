@@ -22,6 +22,31 @@ from exploration.utils import is_vizdoom_env
 from exploration.rl_utils import VizdoomToGymnasium
 
 class CDESPTrainer:
+    """
+    Curiosity-driven Exploration by Self-supervised Prediction (CDESP) 
+    
+    :param env: Reference to the vector environment used for training. Automatically
+        provided from the child's class attributes.
+    :param fwd_coeff: Constant coefficient used for weighting the inverse and forward
+        model's losses for the ICM module. Total loss = inv_loss + fwd_coeff * fwd_loss
+    :param target_window: The length of the moving average window used for extracting a
+        stable mean extrinsic return value to use for target calculaton when adjusting
+        intrinsic reward's weight factor automatically.
+    :param auto_beta: Boolean flag that enables automatic adjustment of the weight 
+        factor used for intrinsic rewards.
+    :param explor_coeff: Exploration coefficient that sets the initial ratio of the 
+        mean extrinsic returns to regress the mean intrinsic returns to. 
+    :param exlor_coeff_f: Exploration coefficient that sets the final ratio of the 
+        mean extrinsic returns to regress the mean intrinsic returns to by the end
+        of training.
+    :param max_grad_norm_icm: Upper limit used for limiting the ICM model's combined 
+        parameters' gradient norm.
+    :param lr_icm: Fixed learning rate used for updating the inverse and forward 
+        model's parameters.
+    :param icm_kwargs: A dictionary of key-value arguments to pass to the ICM's class  
+        contructor. All arguments other than a reference to the env are passed in 
+        this way.
+    """
     def __init__(self, env, fwd_coeff, target_window, auto_beta, explor_coeff, 
                  explor_coeff_f, max_grad_norm_icm, lr_icm, icm_kwargs=dict()):
         self.fwd_coeff = fwd_coeff
@@ -125,7 +150,7 @@ class CDESPTrainer:
         self.explor_coeff += (self.explor_coeff_diff/(epochs_total+1))
 
 class CDESP_PPOTrainer(CDESPTrainer, PPOTrainer):
-    def __init__(self, fwd_coeff=0.25, target_window=10, auto_beta=True, explor_coeff=1.0, 
+    def __init__(self, fwd_coeff=0.25, target_window=10, auto_beta=False, explor_coeff=2.0, 
                  explor_coeff_f=0.0, rew_icm_max=1.0, max_grad_norm_icm=0.5, lr_icm=1e-3, 
                  icm_kwargs=dict(), **ppo_args):
         # Initialize actor-critic trainer
@@ -269,7 +294,7 @@ if __name__ == '__main__':
     parser.add_argument('--target_window', type=int, default=10)
     parser.add_argument('--explor_coeff', type=float, default=2.0)
     parser.add_argument('--explor_coeff_f', type=float, default=0)
-    parser.add_argument('--rew_icm_max', type=float, default=None)
+    parser.add_argument('--rew_icm_max', type=float, default=1.0)
     parser.add_argument('--max_grad_norm_icm', type=float, default=0.5)
     parser.add_argument('--lr_icm', type=float, default=1e-3)
 

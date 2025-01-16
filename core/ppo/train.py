@@ -161,12 +161,68 @@ class PPOSequenceBuffer(PPOBuffer, Dataset):
                 
 
 class PPOTrainer:
+    """
+    Proximal Policy Optimization (PPO)
+
+    :param env_fn: A list of duplicated callable functions that are each used to initialize 
+        an instance of the environment to use in training. The number of entries determines
+        the number of parallel environment used in training.
+    :param wrappers_kwargs: A dictionary of dictionaries where each key corresponds to the 
+        class name of a wrapper applied to the environment. Each value corresponds to the 
+        dictionary of key-value arguments passed to that wrapper upon initialization. This
+        is required for saving environments and reloading them for testing. 
+    :param use_gpu: Boolean flag that if set we'll attempt to use the Nvidia GPU for model
+        evaluation and training if available. Otherwise the CPU is used by default.
+    :param model_path: Absolute path to an existing AC model to load initial parameters from.
+    :param ac: Class type that defines the type of policy to be used (MLP, CNN, etc)
+    :param ac_kwargs: A dictionary of key-value arguments to pass to the actor-critic's class  
+        contructor. All arguments other than a reference to the env are passed in this way.
+    :param seed: Seed given to RNGs. Set for everything (NumPy, PyTorch and CUDA if needed)
+    :param steps_per_epoch: The number of steps executed in the environment per rollout before
+        a parameter update step takes place. Used per environment when running multiple
+        environments in parallel.
+    :param eval_every: The number of epochs to pass between logging the agent's current 
+        performance. Note that for on-policy algorithms, evaluation is online based on
+        the same rollouts used for training. 
+    :param batch_size: Batch size used for sampling experiences from the experience buffer. 
+        Used per environment, so if batch_size=100 and there are 4 parallel environments, 400
+        experience tuples are sampled from the buffer for each update.
+    :param gamma: The discount factor used for future rewards. 
+    :param clip_ratio: Clip ratio used PPO's clipping mechanism of its surrogate objective 
+        function for the policy's loss. 
+    :param lr: Initial learning rate for ADAM optimizer.
+    :param lr_f: Final learning rate for LR scheduling, using a linear schedule, if provided.
+    :param ent_coeff: Entropy coefficient for the combined AC loss function combining the 
+        policy, value and entropy losses. 
+    :param vf_coeff: Value function loss coefficient for the combined AC loss function combining 
+        the policy, value and entropy losses.
+    :param max_grad_norm: Upper limit used for limiting the model's combined parameters' gradient 
+        norm. Applied to both actor and critic's parameters together. 
+    :param clip_grad: Boolean flag that determines whether to apply gradient norm clipping or not.
+    :param train_iters: Number of loops over the whole experience buffer per a single parameter update.
+    :param lam: The constant coefficient lambda used in GAE.
+    :param target_kl: Soft-upper limit on allowable KL-Divergence between new and old policies.
+        Early stopping of parameter updates is triggered if KL exceeds 1.5 * target_kl. 
+    :param seq_len: The length of sequences used for training recurrent policies. 
+    :param seq_prefix: The length of the 'burn-in' period used for stabilizing a recurrent policy's
+        hidden states before feeding in the real sequence used for loss computation. Full sequence 
+        length when sampling = seq_len + seq_prefix
+    :param seq_stride: The stride (step size) between sequential sequences for recurrent policies. 
+        Determines the amout of overlap between sequential sequences.
+    :param log_dir: Absolute path to the directory to use for storing training logs, models and 
+        environements. Created if it does not already exist. Note that previous logs are deleted
+        if an existing log directory is used. 
+    :param save_freq: Number of epochs after which the current AC model is saved, overriding previous
+        existing models. 
+    :param checkpoint_freq: Number of epochs after which the current AC model is saved as an independent
+        checkpoint model that will not be overriden in the future. 
+    """
     def __init__(self, env_fn, wrappers_kwargs=dict(), use_gpu=False, model_path='', 
                  ac=MLPActorCritic, ac_kwargs=dict(), seed=0, steps_per_epoch=1000,
                  eval_every=4, batch_size=100, gamma=0.99, clip_ratio=0.2, lr=3e-4, 
                  lr_f=None, ent_coeff=0.0, vf_coeff=0.5, max_grad_norm=0.5, 
-                 clip_grad=True, train_iters=10, lam=0.95, target_kl=None, seq_len=40, 
-                 seq_prefix=20, seq_stride=10, log_dir=None, save_freq=10, 
+                 clip_grad=False, train_iters=40, lam=0.95, target_kl=None, seq_len=80, 
+                 seq_prefix=40, seq_stride=20, log_dir=None, save_freq=10, 
                  checkpoint_freq=25):
         # Store needed hyperparameters
         self.seed = seed

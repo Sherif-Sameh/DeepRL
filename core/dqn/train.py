@@ -172,6 +172,75 @@ class PrioritizedReplayBuffer(ReplayBuffer):
 
     
 class DQNTrainer:
+    """ 
+    Deep Q-learning Network (DQN) 
+    
+    :param policy: A string specifying the type of policy to be used ('mlp' or 'cnn').
+    :param env_fn: A list of duplicated callable functions that are each used to initialize 
+        an instance of the environment to use in training. The number of entries determines
+        the number of parallel environment used in training.
+    :param wrappers_kwargs: A dictionary of dictionaries where each key corresponds to the 
+        class name of a wrapper applied to the environment. Each value corresponds to the 
+        dictionary of key-value arguments passed to that wrapper upon initialization. This
+        is required for saving environments and reloading them for testing. 
+    :param use_gpu: Boolean flag that if set we'll attempt to use the Nvidia GPU for model
+        evaluation and training if available. Otherwise the CPU is used by default.
+    :param model_path: Absolute path to an existing AC model to load initial parameters from.
+    :param dueling: Boolean flag that specifies if a dueling DQN architecture should be used.
+    :param double_q: Boolean flag that specifies if double DQN should be used. 
+    :param q_net_kwargs: A dictionary of key-value arguments to pass to the DQN's class 
+        constructor. All arguments other than a reference to the env and Epsilon-Greedy 
+        parameters are passed in this way. 
+    :param seed: Seed given to RNGs. Set for everything (NumPy, PyTorch and CUDA if needed)
+    :param prioritized_replay: Boolean flat that specifies if Prioritized Experience Replay (PER)
+        should be used.
+    :param prioritized_replay_alpha: Alpha parameter used by PER for calculating probabilites 
+        for each sample based on its priority. Higher values prioritize large TD errors more.
+    :param prioritized_replay_beta0: Initial value of PER's beta parameter. Used to compensate
+        for bias introduced by prioritized sampling. Always annealed to 1.0 (unbiased).  
+    :param prioritized_replay_beta_rate: Rate for annealing PER's beta parameter. Automatically
+        calculated if left to 0, such that beta reaches 1.0 by the final epoch.
+    :param prioritized_replay_eps: Small epsilon value used for priority calculated to ensure 
+        that all samples have a non-zero probability of being sampled. 
+    :param eps_init: Initial value for epsilon parameter used for the Epsilon-Greedy policy.
+    :param eps_final: Final value for epsilon parameter used for the Epsilon-Greedy policy.
+    :param eps_decay_epochs: The number of epochs over which the epsilon paramter used for 
+        Epsilon-Greedy will be annealed from its initial to its final value. If not set, then 
+        20% of all training epochs is used by default. Epsilon is always decayed exponentially.
+    :param buf_size: Total size of the experience replay buffer in terms of the number of
+        experience tuples stored. 
+    :param steps_per_epoch: The number of steps executed in the environment per rollout before
+        an offline policy evaluation step and peformance logging take place. Used per environment 
+        when running multiple environments in parallel.
+    :param batch_size: Batch size used for sampling experiences from the experience replay buffer. 
+        Used per environment, so if batch_size=100 and there are 4 parallel environments, 400
+        experience tuples are sampled from the buffer for each update.
+    :param learning_starts: Number of steps to take in the environment to populate the replay 
+        buffer before parameter updates can start taking place. Also defined per environment
+        when running multiple environments in parallel.
+    :param train_freq: Number of steps to take in the environment before a parameter update step.
+        Also defined per environment when running multiple environments in parallel.
+    :param num_updates: Number of sequential parameter updates per update step.
+    :param target_network_update_freq: Number of steps to take in the environment before the 
+        parameters of the main network and copied into the target network. Also defined per 
+        environment when running multiple environments in parallel.
+    :param num_test_episodes: Number of episodes to run the greedy policy for during offline 
+        policy evaluation at the end of an epoch. Also defined per environment when running 
+        multiple environments in parallel.
+    :param gamma: The discount factor used for future rewards. 
+    :param lr: Initial learning rate for ADAM optimizer.
+    :param lr_f: Final learning rate for LR scheduling, using a linear schedule, if provided.
+    :param max_grad_norm: Upper limit used for limiting the model's combined parameters' 
+        gradient norm. 
+    :param clip_grad: Boolean flag that determines whether to apply gradient norm clipping or not.
+    :param log_dir: Absolute path to the directory to use for storing training logs, models and 
+        environements. Created if it does not already exist. Note that previous logs are deleted
+        if an existing log directory is used. 
+    :param save_freq: Number of epochs after which the current AC model is saved, overriding previous
+        existing models. 
+    :param checkpoint_freq: Number of epochs after which the current AC model is saved as an independent
+        checkpoint model that will not be overriden in the future. 
+    """
     def __init__(self, policy, env_fn, wrappers_kwargs=dict(), use_gpu=False, model_path='', 
                  dueling=False, double_q=False, q_net_kwargs=dict(), seed=0, 
                  prioritized_replay=False, prioritized_replay_alpha=0.6, 
@@ -180,7 +249,7 @@ class DQNTrainer:
                  eps_decay_epochs=None, buf_size=1000000, steps_per_epoch=1000, 
                  batch_size=100, learning_starts=1000, train_freq=4, num_updates=1, 
                  target_network_update_freq=500, num_test_episodes=10, gamma=0.99, 
-                 lr=5e-4, lr_f=None, max_grad_norm=0.5, clip_grad=True, log_dir=None, 
+                 lr=5e-4, lr_f=None, max_grad_norm=0.5, clip_grad=False, log_dir=None, 
                  save_freq=10, checkpoint_freq=25):
         # Store needed hyperparameters
         self.seed = seed

@@ -172,10 +172,59 @@ class PolicyOptimizer:
         return False, np.zeros(1)
             
 class TRPOTrainer:
+    """
+    Trust Region Policy Optimization (TRPO)
+
+    :param env_fn: A list of duplicated callable functions that are each used to initialize 
+        an instance of the environment to use in training. The number of entries determines
+        the number of parallel environment used in training.
+    :param wrappers_kwargs: A dictionary of dictionaries where each key corresponds to the 
+        class name of a wrapper applied to the environment. Each value corresponds to the 
+        dictionary of key-value arguments passed to that wrapper upon initialization. This
+        is required for saving environments and reloading them for testing. 
+    :param use_gpu: Boolean flag that if set we'll attempt to use the Nvidia GPU for model
+        evaluation and training if available. Otherwise the CPU is used by default.
+    :param model_path: Absolute path to an existing AC model to load initial parameters from.
+    :param ac: Class type that defines the type of policy to be used (MLP, CNN, etc)
+    :param ac_kwargs: A dictionary of key-value arguments to pass to the actor-critic's class  
+        contructor. All arguments other than a reference to the env are passed in this way.
+    :param seed: Seed given to RNGs. Set for everything (NumPy, PyTorch and CUDA if needed)
+    :param steps_per_epoch: The number of steps executed in the environment per rollout before
+        a parameter update step takes place. Used per environment when running multiple
+        environments in parallel.
+    :param eval_every: The number of epochs to pass between logging the agent's current 
+        performance. Note that for on-policy algorithms, evaluation is online based on
+        the same rollouts used for training. 
+    :param gamma: The discount factor used for future rewards. 
+    :param delta: The upper limit on KL-Divergence used for solving TRPO's constrained 
+        optimization problem. 
+    :param surr_obj_min: The lower limit on acceptable improvements in the surrogate objective
+        function for a new policy to be accepted. 
+    :param lr: Initial learning rate for ADAM optimizer.
+    :param lr_f: Final learning rate for LR scheduling, using a linear schedule, if provided.
+    :param max_grad_norm: Upper limit used for limiting the critic's parameters' gradient norm.  
+    :param clip_grad: Boolean flag that determines whether to apply gradient norm clipping or not.
+    :param train_iters: Number of loops over the whole experience buffer per a single parameter update.
+    :param damping_coeff: Damping coefficient used for stability in matrix-vector products peformed as
+        part of the Conjugate Gradient (CG) algorithm.
+    :param cg_iters: Number of iterations to run of the CG algorithm per parameter update.
+    :param backtrack_iters: Number of iterations to run of the Backtracking Line Search algorithm used
+        for ensuring TRPO's contrainits are satisfied.
+    :param backtrack_coeff: Backtracking coefficient used to reduce the step size used for the policy's 
+        parameter updates if TRPO's contraints are not satisfied. 
+    :param lam: The constant coefficient lambda used in GAE.
+    :param log_dir: Absolute path to the directory to use for storing training logs, models and 
+        environements. Created if it does not already exist. Note that previous logs are deleted
+        if an existing log directory is used. 
+    :param save_freq: Number of epochs after which the current AC model is saved, overriding previous
+        existing models. 
+    :param checkpoint_freq: Number of epochs after which the current AC model is saved as an independent
+        checkpoint model that will not be overriden in the future. 
+    """
     def __init__(self, env_fn, wrappers_kwargs=dict(), use_gpu=False, model_path='', 
                  ac=MLPActorCritic, ac_kwargs=dict(), seed=0, steps_per_epoch=1000,
                  eval_every=4, gamma=0.99, delta=0.01, surr_obj_min=0.0, lr=1e-3, 
-                 lr_f=None, max_grad_norm=0.5, clip_grad=True, train_iters=80, 
+                 lr_f=None, max_grad_norm=0.5, clip_grad=False, train_iters=40, 
                  damping_coeff=0.1, cg_iters=10, backtrack_iters=10, backtrack_coeff=0.8, 
                  lam=0.95, log_dir=None, save_freq=10, checkpoint_freq=25):
         # Store needed hyperparameters

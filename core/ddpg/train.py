@@ -148,13 +148,72 @@ class SequenceReplayBuffer(ReplayBuffer):
         self.ep_num_ctrs[env_id] += 1
 
 class DDPGTrainer:
+    """ 
+    Deep Deterministic Policy Gradient (DDPG) 
+    
+    :param env_fn: A list of duplicated callable functions that are each used to initialize 
+        an instance of the environment to use in training. The number of entries determines
+        the number of parallel environment used in training.
+    :param wrappers_kwargs: A dictionary of dictionaries where each key corresponds to the 
+        class name of a wrapper applied to the environment. Each value corresponds to the 
+        dictionary of key-value arguments passed to that wrapper upon initialization. This
+        is required for saving environments and reloading them for testing. 
+    :param use_gpu: Boolean flag that if set we'll attempt to use the Nvidia GPU for model
+        evaluation and training if available. Otherwise the CPU is used by default.
+    :param ac: Class type that defines the type of policy to be used (MLP, CNN, etc)
+    :param ac_kwargs: A dictionary of key-value arguments to pass to the actor-critic's class  
+        contructor. All arguments other than a reference to the env are passed in this way.
+    :param seed: Seed given to RNGs. Set for everything (NumPy, PyTorch and CUDA if needed)
+    :param steps_per_epoch: The number of steps executed in the environment per rollout before
+        an offline policy evaluation step and peformance logging take place. Used per environment 
+        when running multiple environments in parallel.
+    :param buf_size: Total size of the experience replay buffer in terms of the number of
+        experience tuples stored (even if a recurrent policy is used).
+    :param gamma: The discount factor used for future rewards. 
+    :param polyak: The constant factor used for updating target networks' parameters using
+        the method of polyak averaging.
+    :param lr: Initial learning rate for ADAM optimizer.
+    :param lr_f: Final learning rate for LR scheduling, using a linear schedule, if provided.
+    :param max_grad_norm: Upper limit used for limiting the model's combined parameters' 
+        gradient norm. Applied only to the actor's parameters if enabled. 
+    :param clip_grad: Boolean flag that determines whether to apply gradient norm clipping or not.
+    :param batch_size: Batch size used for sampling experiences from the experience replay buffer. 
+        Used per environment, so if batch_size=100 and there are 4 parallel environments, 400
+        experience tuples (or sequences for a recurrent policy) are sampled from the buffer 
+        for each update.
+    :param start_steps: Number of initial steps to take in the environment using randomly 
+        sampled actions. 
+    :param learning_starts: Number of steps to take in the environment to populate the replay 
+        buffer before parameter updates can start taking place. Also defined per environment
+        when running multiple environments in parallel.
+    :param update_every: Number of steps to take in the environment before a parameter update 
+        step. Also defined per environment when running multiple environments in parallel.
+    :param num_updates: Number of sequential parameter updates per update step. Equal to 
+        update_every if left unspecified.
+    :param num_test_episodes: Number of episodes to run the deterministic policy for during 
+        offline policy evaluation at the end of an epoch. Also defined per environment when 
+        running multiple environments in parallel.
+    :param seq_len: The length of sequences used for training recurrent policies. 
+    :param seq_prefix: The length of the 'burn-in' period used for stabilizing a recurrent policy's
+        hidden states before feeding in the real sequence used for loss computation. Full sequence 
+        length when sampling = seq_len + seq_prefix
+    :param seq_stride: The stride (step size) between sequential sequences for recurrent policies. 
+        Determines the amout of overlap between sequential sequences.
+    :param log_dir: Absolute path to the directory to use for storing training logs, models and 
+        environements. Created if it does not already exist. Note that previous logs are deleted
+        if an existing log directory is used. 
+    :param save_freq: Number of epochs after which the current AC model is saved, overriding previous
+        existing models. 
+    :param checkpoint_freq: Number of epochs after which the current AC model is saved as an independent
+        checkpoint model that will not be overriden in the future. 
+    """
     def __init__(self, env_fn, wrappers_kwargs=dict(), use_gpu=False, model_path='', 
                  ac=MLPActorCritic, ac_kwargs=dict(), seed=0, steps_per_epoch=1000, 
                  buf_size=1000000, gamma=0.99, polyak=0.995, lr=1e-3, lr_f=None, 
                  max_grad_norm=0.5, clip_grad=False, batch_size=100, 
                  start_steps=10000, learning_starts=1000, update_every=50, 
-                 num_updates=-1, num_test_episodes=10, seq_len=40, seq_prefix=20,
-                 seq_stride=10, log_dir=None, save_freq=10, checkpoint_freq=25):
+                 num_updates=-1, num_test_episodes=10, seq_len=80, seq_prefix=40,
+                 seq_stride=20, log_dir=None, save_freq=10, checkpoint_freq=25):
         # Store needed hyperparameters
         self.seed = seed
         self.steps_per_epoch = steps_per_epoch

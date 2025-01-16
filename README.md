@@ -25,9 +25,11 @@ This repository contains implementations of the majority of the core algorithms 
 
 * Model saving, checkpointing and ability to start training from an existing model's parameters
 
+* Environment saving and loading for both base or arbitrarily wrapped environments
+
 * Policy testing using saved environments and models in addition to easy video recording
 
-* Environment saving and loading for both base or arbitrarily wrapped environments
+* Support for learning rate scheduling
 
 * Parameter sharing for CNN-based architectures (except for TRPO) 
 
@@ -35,7 +37,7 @@ This repository contains implementations of the majority of the core algorithms 
 
 * Flexible sequence lengths for recurrent policies with adjustable 'burn-in' periods and hidden state management for uninterrupted rollouts
 
-* Extremely customizable algorithm and architecture configurations through scripting or terminal use
+* Extremely customizable algorithm and architecture configurations through scripting or the terminal
 
 # Currently Available Algorithms and Future Developments
 
