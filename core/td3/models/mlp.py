@@ -115,8 +115,7 @@ class MLPActor(MLP):
 
         # Add the output layer to the network and intialize its weights 
         self.net.add_module('actor_output', nn.Linear(hidden_sizes[-1], act_dim))
-        self.net.add_module('actor_output_act', nn.Tanh())
-        self.net[-2:].apply(lambda m: init_weights(m, gain=0.01))
+        self.net[-1].apply(lambda m: init_weights(m, gain=0.01))
 
         # Create and initialize target actor network
         self.net_target = deepcopy(self.net)
@@ -124,11 +123,12 @@ class MLPActor(MLP):
             param.requires_grad = False
     
     def forward(self, obs):
-        return self.net(obs) * self.action_max
+        pre_act = self.net(obs)
+        return torch.tanh(pre_act) * self.action_max, pre_act
     
     def forward_target(self, obs):
         with torch.no_grad():
-            a = self.net_target(obs) * self.action_max
+            a = torch.tanh(self.net_target(obs)) * self.action_max
 
         return a
     
@@ -170,7 +170,7 @@ class MLPActorCritic(nn.Module):
         
     def step(self, obs):
         with torch.no_grad():
-            act = self.actor.forward(obs)
+            act, _ = self.actor.forward(obs)
             act = torch.clip(act + self.action_std * torch.randn_like(act), 
                              min=-self.action_max, max=self.action_max)
             q_val_1 = self.critic_1.forward(obs, act)
@@ -181,7 +181,7 @@ class MLPActorCritic(nn.Module):
     
     def act(self, obs, deterministic=False):
         with torch.no_grad():
-            act = self.actor.forward(obs)
+            act, _ = self.actor.forward(obs)
         
         return act.cpu().numpy()
     
@@ -192,7 +192,7 @@ class MLPActorCritic(nn.Module):
     
     # Only for tracing the actor and critic's networks for tensorboard
     def forward(self, obs):
-        act = self.actor(obs)
+        act, _ = self.actor(obs)
         q_val = self.critic_1(obs, act)
 
         return act, q_val

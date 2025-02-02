@@ -5,6 +5,9 @@ import numpy as np
 import torch
 import gymnasium as gym
 from gymnasium.vector import VectorEnv
+from gymnasium.wrappers import NormalizeObservation
+from gymnasium.wrappers.vector import NormalizeReward as NormalizeRewardVector
+from gymnasium.wrappers.vector import NormalizeObservation as NormalizeObservationVector
 
 
 ''' Performs the Polyak averaging operation used to update the parameters of a target network in
@@ -34,7 +37,51 @@ class SkipAndScaleObservation(gym.Wrapper):
                 break
 
         return obs.astype(np.float32)/255.0, total_reward, terminated, truncated, info
+
+''' Modified version of vector NormalizeObservation wrapper that does not automatically 
+    normalize observations, but only updates their running mean and variance. '''
+class NormalizeObservationManual(NormalizeObservationVector):
+    def observations(self, observations):
+        self.obs_rms.update(observations)
+        return observations
     
+    def normalize_observations(self, observations):
+        return (observations - self.obs_rms.mean) / np.sqrt(
+            self.obs_rms.var + self.epsilon
+        )
+
+''' Modified version of vector NormalizeReward wrapper that does not automatically 
+    normalize rewards, but only updates their running mean and variance. '''
+class NormalizeRewardManual(NormalizeRewardVector):
+    def step(self, actions):
+        obs, reward, terminated, truncated, info = super(NormalizeRewardVector, self).step(actions)
+        self.accumulated_reward = (
+            self.accumulated_reward * self.gamma * (1 - terminated) + reward
+        )
+        self.return_rms.update(self.accumulated_reward)
+        return obs, reward, terminated, truncated, info
+
+    def normalize_rewards(self, rewards):
+        return rewards / np.sqrt(self.return_rms.var + self.epsilon)
+
+''' Environment wrapper that extends NormalizeObservation to accept initial values 
+and freezes running mean and variance updates. Used for evaluation. '''
+class NormalizeObservationFrozen(NormalizeObservation):
+    def __init__(self, env, mean=0, var=1.0, epsilon = 1e-8):
+        super().__init__(env, epsilon)
+        self.obs_rms.mean = mean
+        self.obs_rms.var = var
+        self.update_running_mean = False
+
+''' Traverses the hierarchy of wrappers to find the NormalizeObservation wrapper
+and return its running mean and variance values '''
+def get_obs_mean_var(env):
+    while env is not None:
+        if hasattr(env, 'obs_rms'):
+            return np.copy(env.obs_rms.mean), np.copy(env.obs_rms.var)
+        env = getattr(env, 'env', None) 
+    
+    return 0.0, 1.0
 
 ''' Save a Gymnasium environment using Pickle '''
 def save_env(env_fn, wrappers_kwargs, save_dir, render_mode='human'):
@@ -50,7 +97,8 @@ def save_env(env_fn, wrappers_kwargs, save_dir, render_mode='human'):
     
     # Create environment state dictionary
     state_dict = {
-        'base_env': base_env,
+        'base_env_class': base_env.__class__,
+        'base_env_kwargs': base_env.spec.kwargs,  
         'wrappers': wrappers,
         'wrappers_kwargs': wrappers_kwargs
     }
@@ -60,13 +108,28 @@ def save_env(env_fn, wrappers_kwargs, save_dir, render_mode='human'):
     
     base_env.close()
 
+''' Update the stored running mean and variance for normalize observation wrapper '''
+def update_mean_var_env(env, save_dir, render_mode='human'):
+    obs_mean, obs_var = get_obs_mean_var(env)
+    filepath = os.path.join(save_dir, f'env_{str(render_mode)}.pkl')
+    if os.path.exists(filepath):
+        with open(filepath, 'rb') as f:
+            state_dict = pickle.load(f)
+        if 'NormalizeObservationFrozen' in state_dict['wrappers_kwargs']:
+            state_dict['wrappers_kwargs']['NormalizeObservationFrozen'] = \
+                {'mean': obs_mean, 'var': obs_var}
+            with open(filepath, 'wb') as f:
+                pickle.dump(state_dict, f)
+
 ''' Load a Gymnasium environment using Pickle '''
 def load_env(save_dir, render_mode='human'):
     with open(os.path.join(save_dir, f'env_{str(render_mode)}.pkl'), 'rb') as f:
         state_dict = pickle.load(f)
     
     # Create base environment
-    env = state_dict['base_env']
+    base_env_class = state_dict['base_env_class']
+    base_env_kwargs = state_dict['base_env_kwargs']
+    env = base_env_class(**base_env_kwargs)
 
     # Re-wrap environment using all its stored wrappers
     wrappers_kwargs = state_dict['wrappers_kwargs']

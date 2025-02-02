@@ -119,6 +119,7 @@ if __name__ == '__main__':
                 env.render()
             act = model.act(torch.as_tensor(obs, dtype=torch.float32).to(device),
                             deterministic=args.deterministic)
+            if act.dtype == np.int64: act = int(act) # Deals with a bug in Vizdoom (temporary)
             obs, rew, terminated, truncated, _ = env.step(act)
             ep_ret, ep_len = ep_ret + rew, ep_len + 1
             done = terminated or truncated

@@ -6,3 +6,8 @@ mp.set_start_method("spawn", force=True)
 
 # Register VizDoom environments
 from vizdoom import gymnasium_wrapper 
+
+# Register Gymnasium-Robotics environments
+import gymnasium as gym
+import gymnasium_robotics
+gym.register_envs(gymnasium_robotics)

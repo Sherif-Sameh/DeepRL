@@ -3,7 +3,7 @@ import gymnasium as gym
 from gymnasium.vector import AsyncVectorEnv
 from gymnasium.spaces import Box, Discrete
 from gymnasium.wrappers import FrameStackObservation, GrayscaleObservation
-from gymnasium.wrappers.vector import RescaleAction, ClipAction, NormalizeReward
+from gymnasium.wrappers.vector import RescaleAction, ClipAction, NormalizeReward, NormalizeObservation
 import numpy as np
 import torch
 import torch.nn.functional as F
@@ -13,7 +13,8 @@ from torch.utils.tensorboard import SummaryWriter
 
 from core.a2c.models.mlp import MLPActorCritic
 from core.a2c.models.cnn import CNNActorCritic
-from core.rl_utils import SkipAndScaleObservation, save_env, run_env
+from core.rl_utils import SkipAndScaleObservation, NormalizeObservationFrozen
+from core.rl_utils import save_env, run_env, update_mean_var_env
 from core.utils import serialize_locals, clear_logs
 
 class A2CBuffer:
@@ -105,6 +106,8 @@ class A2CTrainer:
     :param lam: The constant coefficient lambda used in GAE.
     :param lr: Initial learning rate for ADAM optimizer.
     :param lr_f: Final learning rate for LR scheduling, using a linear schedule, if provided.
+    :param norm_rew: Boolean flag that determines whether to apply return normalization or not.
+    :param norm_obs: Boolean flag that determines whether to apply observation normalization or not.
     :param ent_coeff: Entropy coefficient for the combined AC loss function combining the 
         policy, value and entropy losses. 
     :param vf_coeff: Value function loss coefficient for the combined AC loss function combining 
@@ -123,9 +126,10 @@ class A2CTrainer:
     """
     def __init__(self, env_fn, wrappers_kwargs=dict(), use_gpu=False, model_path='', 
                  ac=MLPActorCritic, ac_kwargs=dict(), seed=0, steps_per_epoch=1000, 
-                 eval_every=4, gamma=0.99, lam=0.95, lr=3e-4, lr_f=None, ent_coeff=0.0, 
-                 vf_coeff=0.5, max_grad_norm=0.5, clip_grad=False, train_iters=40, 
-                 log_dir=None, save_freq=10, checkpoint_freq=25):
+                 eval_every=4, gamma=0.99, lam=0.95, lr=3e-4, lr_f=None, norm_rew=False,
+                 norm_obs=False, ent_coeff=0.0, vf_coeff=0.5, max_grad_norm=0.5, 
+                 clip_grad=False, train_iters=40, log_dir=None, save_freq=10, 
+                 checkpoint_freq=25):
         # Store needed hyperparameters
         self.seed = seed
         self.steps_per_epoch = steps_per_epoch
@@ -134,6 +138,8 @@ class A2CTrainer:
         self.gamma = gamma
         self.lr = lr
         self.lr_f = lr_f
+        self.norm_rew = norm_rew
+        self.norm_obs = norm_obs
         self.ent_coeff = ent_coeff
         self.vf_coeff = vf_coeff
         self.max_grad_norm = max_grad_norm
@@ -161,9 +167,15 @@ class A2CTrainer:
         self.env = AsyncVectorEnv(env_fn)
         self.env = ClipAction(RescaleAction(self.env, min_action=-1.0, max_action=1.0)) \
             if isinstance(self.env.single_action_space, Box) else self.env # Rescale cont. action spaces to [-1, 1]
+        if self.norm_obs:
+            self.env = NormalizeObservation(self.env)
+            env_fn_save = lambda render_mode=None: NormalizeObservationFrozen(env_fn[0](render_mode=render_mode))
+            wrappers_kwargs['NormalizeObservationFrozen'] = {}
+        else:
+            env_fn_save = env_fn[0]
         try:
-            save_env(env_fn[0], wrappers_kwargs, self.writer.get_logdir(), render_mode='human')
-            save_env(env_fn[0], wrappers_kwargs, self.writer.get_logdir(), render_mode='rgb_array')
+            save_env(env_fn_save, wrappers_kwargs, self.writer.get_logdir(), render_mode='human')
+            save_env(env_fn_save, wrappers_kwargs, self.writer.get_logdir(), render_mode='rgb_array')
         except Exception as e:
             print(f'Could not save environment: {e} \n\n')
 
@@ -245,11 +257,10 @@ class A2CTrainer:
         self.writer.add_scalar('Pi/KL', approx_kl, epoch+1)
 
     def _proc_env_rollout(self, env_id, val_terminal, rollout_len, ep_ret, ep_len):
-        ep_ret[env_id] += self.buf.terminate_ep(env_id, rollout_len, val_terminal)
-        ep_ret[env_id] *= np.sqrt(self.env.return_rms.var + self.env.epsilon)
-        self.ep_len_list.append(ep_len[env_id])
-        self.ep_ret_list.append(ep_ret[env_id])
-        ep_len[env_id], ep_ret[env_id] = 0, 0
+        ep_ret += self.buf.terminate_ep(env_id, rollout_len, val_terminal)
+        ep_ret *= np.sqrt(self.env.return_rms.var + self.env.epsilon)
+        self.ep_len_list.append(ep_len)
+        self.ep_ret_list.append(ep_ret)
 
     def _proc_epoch_rollout(self, obs_final, ep_ret, ep_len):
         to_tensor = lambda x: torch.as_tensor(x, dtype=torch.float32, device=self.device)
@@ -275,6 +286,22 @@ class A2CTrainer:
         self.writer.add_scalar('VVals/max', self.buf.val.max(), epoch+1)
         self.writer.add_scalar('VVals/min', self.buf.val.min(), epoch+1)
 
+    def _save_model(self, epoch):
+        if ((epoch + 1) % self.save_freq) == 0:
+            torch.save(self.ac_mod, os.path.join(self.save_dir, 'model.pt'))
+            if self.norm_obs:
+                update_mean_var_env(self.env, self.writer.get_logdir(), render_mode='human')
+        if ((epoch + 1) % self.checkpoint_freq) == 0:
+            torch.save(self.ac_mod, os.path.join(self.save_dir, f'model{epoch+1}.pt'))
+            
+    def _end_training(self):
+        torch.save(self.ac_mod, os.path.join(self.save_dir, 'model.pt'))
+        if self.norm_obs:
+            update_mean_var_env(self.env, self.writer.get_logdir(), render_mode='human')
+            update_mean_var_env(self.env, self.writer.get_logdir(), render_mode='rgb_array')
+        self.writer.close()
+        self.env.close()
+
     def learn(self, epochs=100, ep_init=10):
         # Initialize scheduler
         self.epochs = epochs
@@ -286,6 +313,10 @@ class A2CTrainer:
         # Normalize returns for more stable training
         if not isinstance(self.env, NormalizeReward):
             self.env = NormalizeReward(self.env, gamma=self.gamma)
+        if self.norm_rew == False:
+            self.env.return_rms.var = 1
+            self.env.epsilon = 0
+            self.env.update_running_mean = False
         self.env.reset(seed=self.seed)
         run_env(self.env, num_episodes=ep_init)
 
@@ -307,17 +338,15 @@ class A2CTrainer:
                                                val[env_id], logp[env_id], step)
                     if autoreset_next[env_id]:
                         val_terminal = 0 if terminated[env_id] else self.ac_mod.get_terminal_value(to_tensor(obs_next), env_id)
-                        self._proc_env_rollout(env_id, val_terminal, min(ep_len[env_id], step+1), ep_ret, ep_len)
+                        self._proc_env_rollout(env_id, val_terminal, min(ep_len[env_id], step+1), ep_ret[env_id], ep_len[env_id])
+                        ep_len[env_id], ep_ret[env_id] = 0, 0
+
                 obs, autoreset = obs_next, autoreset_next
             
             self._proc_epoch_rollout(obs, ep_ret, ep_len)
             self._train(epoch)
             ac_scheduler.step()
-            
-            if ((epoch + 1) % self.save_freq) == 0:
-                torch.save(self.ac_mod, os.path.join(self.save_dir, 'model.pt'))
-            if ((epoch + 1) % self.checkpoint_freq) == 0:
-                torch.save(self.ac_mod, os.path.join(self.save_dir, f'model{epoch+1}.pt'))
+            self._save_model(epoch)
                 
             # Log info about epoch
             if ((epoch + 1) % self.eval_every) == 0:
@@ -325,10 +354,8 @@ class A2CTrainer:
                 self.ep_len_list, self.ep_ret_list = [], []
                 self.writer.flush()
         
-        # Save final model
-        torch.save(self.ac_mod, os.path.join(self.save_dir, 'model.pt'))
-        self.writer.close()
-        self.env.close()
+        # Save final model and finalize training
+        self._end_training()
         print(f'Model {epochs} (final) saved successfully')
                 
 def get_parser():
@@ -363,6 +390,8 @@ def get_parser():
     parser.add_argument('--gamma', type=float, default=0.99)
     parser.add_argument('--lr', type=float, default=3e-4)
     parser.add_argument('--lr_f', type=float, default=None)
+    parser.add_argument('--norm_rew', action="store_true", default=False)
+    parser.add_argument('--norm_obs', action="store_true", default=False)
     parser.add_argument('--ent_coeff', type=float, default=0.0)
     parser.add_argument('--vf_coeff', type=float, default=0.5)
     parser.add_argument('--max_grad_norm', type=float, default=0.5)
@@ -424,9 +453,10 @@ if __name__ == '__main__':
     trainer = A2CTrainer(env_fn, wrappers_kwargs=wrappers_kwargs, use_gpu=args.use_gpu, 
                          model_path=args.model_path, ac=ac, ac_kwargs=ac_kwargs, seed=args.seed, 
                          steps_per_epoch=args.steps, eval_every=args.eval_every, gamma=args.gamma, 
-                         lam=args.lam, lr=args.lr, lr_f=args.lr_f, ent_coeff=args.ent_coeff, 
-                         vf_coeff=args.vf_coeff, max_grad_norm=args.max_grad_norm, 
-                         clip_grad=args.clip_grad, train_iters=args.train_iters, log_dir=log_dir, 
-                         save_freq=args.save_freq, checkpoint_freq=args.checkpoint_freq)
+                         lam=args.lam, lr=args.lr, lr_f=args.lr_f, norm_rew=args.norm_rew, 
+                         norm_obs=args.norm_obs, ent_coeff=args.ent_coeff, vf_coeff=args.vf_coeff, 
+                         max_grad_norm=args.max_grad_norm, clip_grad=args.clip_grad, 
+                         train_iters=args.train_iters, log_dir=log_dir, save_freq=args.save_freq, 
+                         checkpoint_freq=args.checkpoint_freq)
     
     trainer.learn(epochs=args.epochs, ep_init=args.ep_init)

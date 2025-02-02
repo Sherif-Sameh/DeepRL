@@ -139,12 +139,11 @@ class CNNActor(nn.Module):
             layers.append((f'actor_hidden_{i+1}', nn.Linear(hidden_sizes[i], hidden_sizes[i+1])))
             layers.append((f'actor_activation_{i+1}', nn.ReLU()))
         layers.append(('actor_output', nn.Linear(hidden_sizes[-1], act_dim)))
-        layers.append(('actor_output_act', nn.Tanh()))
 
         # Initialize the actor's head and its weights
         self.actor_head = nn.Sequential(OrderedDict(layers))
         self.actor_head.apply(lambda m: init_weights(m, gain=1.0))
-        self.actor_head[-2:].apply(lambda m: init_weights(m, gain=0.01))
+        self.actor_head[-1].apply(lambda m: init_weights(m, gain=0.01))
 
         # Create and initialize target actor's head
         self.actor_head_target = deepcopy(self.actor_head)
@@ -152,11 +151,12 @@ class CNNActor(nn.Module):
             param.requires_grad = False
     
     def forward(self, obs):
-        return self.actor_head(self.feature_ext(obs)) * self.action_max
+        pre_act = self.actor_head(self.feature_ext(obs))
+        return torch.tanh(pre_act) * self.action_max, pre_act
     
     def forward_target(self, obs):
         with torch.no_grad():
-            a = self.actor_head_target(self.feature_ext_target(obs)) * self.action_max
+            a = torch.tanh(self.actor_head_target(self.feature_ext_target(obs))) * self.action_max
         
         return a
 
@@ -209,20 +209,20 @@ class CNNActorCritic(nn.Module):
         
     def step(self, obs):
         with torch.no_grad():
-            features = self.feature_ext(obs)
-            act = self.actor.actor_head(features)
+            act, _ = self.actor.forward(obs)
             act = torch.clip(act + self.action_std * torch.randn_like(act), 
                              min=-self.action_max, max=self.action_max)
-            q_val = self.critic.critic_head(torch.cat([features, act], dim=1))
+            q_val = self.critic.forward(obs, act)
 
         return act.cpu().numpy(), q_val.cpu().numpy().squeeze()
 
     def act(self, obs, deterministic=False):
         with torch.no_grad():
             if obs.ndim == 3:
-                act = self.actor.forward(obs[None]).squeeze(dim=0)
+                act, _ = self.actor.forward(obs[None])
+                act = act.squeeze(dim=0)
             else:
-                act = self.actor.forward(obs)
+                act, _ = self.actor.forward(obs)
         
         return act.cpu().numpy()
     
@@ -233,9 +233,8 @@ class CNNActorCritic(nn.Module):
     
     # Only for tracing the actor and critic's networks for tensorboard
     def forward(self, obs):
-        features = self.feature_ext(obs)
-        act = self.actor.actor_head(features)
-        q_val = self.critic.critic_head(torch.cat([features, act], dim=1))
+        act, _ = self.actor.forward(obs)
+        q_val = self.critic.forward(obs, act)
 
         return act, q_val
     

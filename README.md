@@ -79,15 +79,20 @@ https://doi.org/10.48550/arXiv.1705.05363))
 	* Hindsight Experience Replay ([HER](	
 	https://doi.org/10.48550/arXiv.1707.01495
 	))
+
 	* Adaptive Policy ReguLarization ([APRL](	
-	https://doi.org/10.48550/arXiv.2310.17634))  
+	https://doi.org/10.48550/arXiv.2310.17634)) 
+	
+	* Maximum Entropy Gain Exploration ([MEGA](
+	https://doi.org/10.48550/arXiv.2007.02832))
 
 ## Hierarchical RL 
 
 * To do:
 	* Hierarchical Actor-Critic ([HAC](	
 	https://doi.org/10.48550/arXiv.1712.00948))
- 	* Double Actor-Critic ([DAC](	
+ 	
+	* Double Actor-Critic ([DAC](	
 	https://doi.org/10.48550/arXiv.1904.12691))
 
 ## Imitation Learning
@@ -100,7 +105,9 @@ https://doi.org/10.48550/arXiv.1705.05363))
 
 * To do:
 	* Adverserial RL
+	
 	* Meta RL
+	
 	* Policy Distillation
 
 # Acknowledgments

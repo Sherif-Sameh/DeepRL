@@ -122,13 +122,13 @@ class MLPActor(MLP):
         normal, eps = Normal(loc=mu, scale=std), 1e-6
         log_p = normal.log_prob(u).sum(dim=-1) - torch.log(1 - a**2 + eps).sum(dim=-1)
 
-        return a * self.action_max, log_p
+        return a * self.action_max, log_p, u
     
     def log_prob_no_grad(self, obs):
         with torch.no_grad():
-            a, log_p = self.log_prob(obs)
+            a, log_p, u = self.log_prob(obs)
         
-        return a, log_p
+        return a, log_p, u
     
 
 class MLPActorCritic(nn.Module):

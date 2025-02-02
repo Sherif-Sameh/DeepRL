@@ -193,11 +193,11 @@ class CDESP_PPOTrainer(CDESPTrainer, PPOTrainer):
         super()._proc_env_rollout(env_id, val_terminal, rollout_len, ep_ret, ep_len)
         
         # Get and store sum of intrinsic rewards from wrapper
-        ep_ret_icm, ep_ret = self.env.env.get_and_clear_return(env_id)
+        ep_ret_icm, ep_ret_ext = self.env.env.get_and_clear_return(env_id)
         self.ep_ret_icm_list.append(ep_ret_icm)
         
         # Replace combined return with extrinsic return
-        self.ep_ret_list[-1] = ep_ret
+        self.ep_ret_list[-1] = ep_ret_ext
 
     def _log_ep_stats(self, epoch):
         super()._log_ep_stats(epoch)
@@ -234,7 +234,7 @@ class CDESP_TD3Trainer(CDESPTrainer, TD3Trainer):
                 
         # Update ICM's parameters
         beta_0 = self.icm_mod.get_beta().detach()
-        obs, act, _, _, _, mask = self.buf.get_batch(self.device)
+        obs, act, _, _, _, mask = self.buf.get_batch()
         loss_inv, loss_fwd = self._step_icm_params(obs, act, mask)
         loss_beta = self._step_icm_beta(beta_0, ret_mean, ret_mean_ext)
         self._step_exploration_coeff(self.epochs)
@@ -277,7 +277,7 @@ if __name__ == '__main__':
     # Parse first argument to know algorithm type
     algo, remaining_args = get_algo_type()
 
-    # Get parser all remaining DRL algorithm and add CDESP arguments 
+    # Get parser for all remaining DRL algorithm arguments and add CDESP arguments 
     if algo == 'ppo':
         parser = get_parser_ppo()
     elif algo == 'td3':
@@ -298,7 +298,7 @@ if __name__ == '__main__':
     parser.add_argument('--max_grad_norm_icm', type=float, default=0.5)
     parser.add_argument('--lr_icm', type=float, default=1e-3)
 
-    # Miniworld specific arguments
+    # ViZDoom specific arguments
     parser.add_argument('--vizdoom_obs_size', type=int, default=42)
 
     args = parser.parse_args(remaining_args)
@@ -371,12 +371,13 @@ if __name__ == '__main__':
                                    model_path=args.model_path, ac=ac, ac_kwargs=ac_kwargs, 
                                    seed=args.seed, steps_per_epoch=args.steps, eval_every=args.eval_every, 
                                    batch_size=args.batch_size, gamma=args.gamma, clip_ratio=args.clip_ratio, 
-                                   lr=args.lr, lr_f=args.lr_f, ent_coeff=args.ent_coeff, 
-                                   vf_coeff=args.vf_coeff, max_grad_norm=args.max_grad_norm, 
-                                   clip_grad=args.clip_grad, train_iters=args.train_iters, 
-                                   lam=args.lam, target_kl=args.target_kl, seq_len=args.seq_len, 
-                                   seq_prefix=args.seq_prefix, seq_stride=args.seq_stride, log_dir=log_dir, 
-                                   save_freq=args.save_freq, checkpoint_freq=args.checkpoint_freq)
+                                   lr=args.lr, lr_f=args.lr_f, norm_rew=args.norm_rew, norm_obs=args.norm_obs,
+                                   ent_coeff=args.ent_coeff, vf_coeff=args.vf_coeff, 
+                                   max_grad_norm=args.max_grad_norm, clip_grad=args.clip_grad, 
+                                   train_iters=args.train_iters, lam=args.lam, target_kl=args.target_kl, 
+                                   seq_len=args.seq_len, seq_prefix=args.seq_prefix, seq_stride=args.seq_stride, 
+                                   log_dir=log_dir, save_freq=args.save_freq, 
+                                   checkpoint_freq=args.checkpoint_freq)
     elif algo == 'td3':
         trainer = CDESP_TD3Trainer(fwd_coeff=args.fwd_coeff, target_window=args.target_window,
                                    auto_beta=args.auto_beta, explor_coeff=args.explor_coeff, 
@@ -387,14 +388,15 @@ if __name__ == '__main__':
                                    model_path=args.model_path, ac=ac, ac_kwargs=ac_kwargs, 
                                    seed=args.seed, steps_per_epoch=args.steps, buf_size=args.buf_size, 
                                    gamma=args.gamma, polyak=args.polyak, lr=args.lr, lr_f=args.lr_f, 
-                                   max_grad_norm=args.max_grad_norm, clip_grad=args.clip_grad, 
-                                   batch_size=args.batch_size, start_steps=args.start_steps, 
-                                   learning_starts=args.learning_starts, update_every=args.update_every,
-                                   num_updates=args.num_updates, target_noise=args.target_noise, 
-                                   noise_clip=args.noise_clip, policy_delay=args.policy_delay, 
-                                   num_test_episodes=args.num_test_episodes, seq_len=args.seq_len, 
-                                   seq_prefix=args.seq_prefix, seq_stride=args.seq_stride, 
-                                   log_dir=log_dir, save_freq=args.save_freq, 
+                                   pre_act_coeff=args.pre_act_coeff, norm_rew=args.norm_rew, 
+                                   norm_obs=args.norm_obs, max_grad_norm=args.max_grad_norm, 
+                                   clip_grad=args.clip_grad, batch_size=args.batch_size, 
+                                   start_steps=args.start_steps, learning_starts=args.learning_starts, 
+                                   update_every=args.update_every, num_updates=args.num_updates, 
+                                   target_noise=args.target_noise, noise_clip=args.noise_clip, 
+                                   policy_delay=args.policy_delay, num_test_episodes=args.num_test_episodes, 
+                                   seq_len=args.seq_len, seq_prefix=args.seq_prefix, 
+                                   seq_stride=args.seq_stride, log_dir=log_dir, save_freq=args.save_freq, 
                                    checkpoint_freq=args.checkpoint_freq)
         
     trainer.learn(args.epochs, ep_init=args.ep_init)

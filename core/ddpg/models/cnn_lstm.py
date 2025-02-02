@@ -181,12 +181,11 @@ class CNNLSTMActor(nn.Module):
             layers.append((f'actor_hidden_{i+1}', nn.Linear(hidden_sizes[i], hidden_sizes[i+1])))
             layers.append((f'actor_activation_{i+1}', nn.ReLU()))
         layers.append(('actor_output', nn.Linear(hidden_sizes[-1], act_dim)))
-        layers.append(('actor_output_act', nn.Tanh()))
 
         # Initialize the actor's head and its weights
         self.actor_head = nn.Sequential(OrderedDict(layers))
         self.actor_head.apply(lambda m: init_weights(m, gain=1.0))
-        self.actor_head[-2:].apply(lambda m: init_weights(m, gain=0.01))
+        self.actor_head[-1].apply(lambda m: init_weights(m, gain=0.01))
 
         # Create and initialize target actor's head
         self.actor_head_target = deepcopy(self.actor_head)
@@ -195,15 +194,15 @@ class CNNLSTMActor(nn.Module):
     
     def forward(self, obs, features=None):
         if features is None: features = self.feature_ext(obs) 
-        a = self.actor_head(features.flatten(0, 1)) * self.action_max
-        a = a.view(*features.shape[:2], self.act_dim)
+        pre_act = self.actor_head(features.flatten(0, 1)).view(*features.shape[:2], self.act_dim)
+        a = torch.tanh(pre_act) * self.action_max
 
-        return a
+        return a, pre_act
     
     def forward_target(self, obs):
         with torch.no_grad():
-            a = self.actor_head_target(self.feature_ext_target(obs).flatten(0, 1)) * self.action_max
-            a = a.view(*obs.shape[:2], self.act_dim)
+            pre_act = self.actor_head_target(self.feature_ext_target(obs).flatten(0, 1))
+            a = torch.tanh(pre_act.view(*obs.shape[:2], self.act_dim)) * self.action_max
         
         return a
 
@@ -260,7 +259,7 @@ class CNNLSTMActorCritic(nn.Module):
     def step(self, obs):
         with torch.no_grad():
             features = self.feature_ext(obs.unsqueeze(1))
-            act = self.actor.forward(obs, features=features)
+            act, _ = self.actor.forward(obs, features=features)
             act = torch.clip(act + self.action_std * torch.randn_like(act), 
                              min=-self.action_max, max=self.action_max)
             q_val = self.critic.forward(obs, act, features=features)
@@ -271,9 +270,11 @@ class CNNLSTMActorCritic(nn.Module):
         with torch.no_grad():
             # Make sure that obs always has batch and sequence dimensions
             if obs.ndim == 3:
-                act = self.actor.forward(obs.unsqueeze(0).unsqueeze(0)).squeeze(0, 1)
+                act, _ = self.actor.forward(obs.unsqueeze(0).unsqueeze(0))
+                act = act.squeeze(0, 1)
             else:
-                act = self.actor.forward(obs.unsqueeze(1)).squeeze(1)
+                act, _ = self.actor.forward(obs.unsqueeze(1))
+                act = act.squeeze(1)
         
         return act.cpu().numpy()
     
@@ -308,7 +309,7 @@ class CNNLSTMActorCritic(nn.Module):
     def forward(self, obs):
         self.reset_hidden_states(torch.device('cpu'), batch_size=obs.shape[0])
         features = self.feature_ext(obs.unsqueeze(1))
-        act = self.actor.forward(obs, features=features)
+        act, _ = self.actor.forward(obs, features=features)
         q_val = self.critic.forward(obs, act, features=features)
 
         return act, q_val
