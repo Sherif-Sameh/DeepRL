@@ -75,17 +75,14 @@ https://doi.org/10.48550/arXiv.1812.05905))
 * Curiosity-driven Exploration by Self-supervised Prediction ([CDESP](	
 https://doi.org/10.48550/arXiv.1705.05363))
 
-* To do:
-	* Hindsight Experience Replay ([HER](	
-	https://doi.org/10.48550/arXiv.1707.01495
-	))
+* Hindsight Experience Replay ([HER](	
+https://doi.org/10.48550/arXiv.1707.01495
+))
 
+* To do:
 	* Adaptive Policy ReguLarization ([APRL](	
 	https://doi.org/10.48550/arXiv.2310.17634)) 
 	
-	* Maximum Entropy Gain Exploration ([MEGA](
-	https://doi.org/10.48550/arXiv.2007.02832))
-
 ## Hierarchical RL 
 
 * To do:
