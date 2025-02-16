@@ -14,7 +14,7 @@ from core.td3.train import TD3Trainer
 from core.td3.train import get_parser as get_parser_td3
 from core.ppo.models.cnn_lstm import CNNLSTMActorCritic as PPOActorCritic
 from core.td3.models.cnn_lstm import CNNLSTMActorCritic as TD3ActorCritic
-from core.rl_utils import SkipAndScaleObservation
+from core.rl_utils import SkipAndScaleObservation, call_env_method
 
 from exploration.cdesp.models.icm import IntrinsicCuriosityModule
 from exploration.cdesp.icm_wrapper import IntrinsicRewardWrapper
@@ -193,7 +193,7 @@ class CDESP_PPOTrainer(CDESPTrainer, PPOTrainer):
         super()._proc_env_rollout(env_id, val_terminal, rollout_len, ep_ret, ep_len)
         
         # Get and store sum of intrinsic rewards from wrapper
-        ep_ret_icm, ep_ret_ext = self.env.env.get_and_clear_return(env_id)
+        ep_ret_icm, ep_ret_ext = call_env_method(self.env, "get_and_clear_return", env_id)
         self.ep_ret_icm_list.append(ep_ret_icm)
         
         # Replace combined return with extrinsic return
@@ -248,14 +248,14 @@ class CDESP_TD3Trainer(CDESPTrainer, TD3Trainer):
         super()._proc_env_rollout(env_id, ep_len)
 
         # Get and store sum of intrinsic rewards from wrapper
-        ep_ret_icm, _ = self.env.env.get_and_clear_return(env_id)
+        ep_ret_icm, _ = call_env_method(self.env, "get_and_clear_return", env_id)
         self.ep_ret_icm_list.append(ep_ret_icm)
 
     def _eval(self):
         # Disable intrinsic rewards for evaluation and re-enable them after
-        self.env.env.disable_intrinsic_reward()
+        call_env_method(self.env, "disable_intrinsic_reward")
         super()._eval()
-        self.env.env.enable_intrinsic_reward()
+        call_env_method(self.env, "enable_intrinsic_reward")
     
     def _log_ep_stats(self, epoch, q_val_list):
         super()._log_ep_stats(epoch, q_val_list)

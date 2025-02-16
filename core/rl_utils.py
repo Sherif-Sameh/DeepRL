@@ -18,6 +18,12 @@ def polyak_average(params, target_params, polyak):
             param_target.data.mul_(polyak)
             param_target.data.add_(param.data, alpha=1-polyak)
 
+''' Copies the values of parameters in the main network to the target network '''
+def copy_parameters(params, target_params):
+    with torch.no_grad():
+        for param, param_target in zip(params, target_params):
+            param_target.copy_(param)
+
 ''' Environment wrapper for skipping a certain number of observations using action-repeat 
 and Scaling uint8 image observations from 0 to 255 to 32-bit floats from 0.0 to 1.0''' 
 class SkipAndScaleObservation(gym.Wrapper):
@@ -72,6 +78,17 @@ class NormalizeObservationFrozen(NormalizeObservation):
         self.obs_rms.mean = mean
         self.obs_rms.var = var
         self.update_running_mean = False
+
+''' Traverses the heirarchy of wrappers to find the given method, call it and return
+all returned values from that method. '''
+def call_env_method(env, method: str, *method_args):
+    while env is not None:
+        if hasattr(env, method):
+            return getattr(env, method)(*method_args)
+        env = getattr(env, 'env', None)
+    
+    raise AttributeError(f'Base environment nor any of its wrapped versions \
+                         has the method {method}')
 
 ''' Traverses the hierarchy of wrappers to find the NormalizeObservation wrapper
 and return its running mean and variance values '''

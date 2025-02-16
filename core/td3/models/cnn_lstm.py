@@ -268,7 +268,7 @@ class CNNLSTMActorCritic(nn.Module):
                              min=-self.action_max, max=self.action_max)
             q_val = self.critic_1.forward(obs, act, features=features)
         
-        return act.squeeze(1).cpu().numpy(), q_val.cpu().numpy().squeeze()
+        return act.squeeze(1).cpu().numpy(), q_val.cpu().numpy().squeeze((1, 2))
 
     def act(self, obs, deterministic=False):
         with torch.no_grad():

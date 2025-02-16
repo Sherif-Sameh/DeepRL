@@ -1,8 +1,9 @@
 import cv2
 import numpy as np
+from typing import Optional
+import gymnasium as gym
 from gymnasium import spaces
-from gymnasium import ObservationWrapper
-from gymnasium.wrappers.vector import NormalizeObservation, NormalizeReward
+from gymnasium import Wrapper, ObservationWrapper
 
 ''' Observation wrapper for ViZDoom environments to extract normal RGB image 
     observations from Dict observation and resize to a given image size'''

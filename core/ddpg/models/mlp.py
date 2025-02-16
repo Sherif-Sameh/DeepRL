@@ -172,7 +172,7 @@ class MLPActorCritic(nn.Module):
                              min=-self.action_max, max=self.action_max)
             q_val = self.critic.forward(obs, act)
 
-        return act.cpu().numpy(), q_val.cpu().numpy().squeeze()
+        return act.cpu().numpy(), q_val.cpu().numpy().squeeze(1)
     
     def act(self, obs, deterministic=False):
         with torch.no_grad():

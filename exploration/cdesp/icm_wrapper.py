@@ -14,13 +14,16 @@ class IntrinsicRewardWrapper(VectorWrapper):
         self.valid_transition = np.zeros(self.env.num_envs)
         self.returns_intrinsic = np.zeros(self.env.num_envs)
         self.returns_extrinsic = np.zeros(self.env.num_envs)
+        def identity(x): return x
+        self.obs_transform = self.env.normalize_observations if hasattr(self.env, "normalize_observations") else identity
+
 
     def reset(self, *, seed = None, options = None):
         observations, infos = super().reset(seed=seed, options=options)
         
         # Reset internal states
         if self.active == True:
-            self.obs_prev = np.copy(observations)
+            self.obs_prev = self.obs_transform(np.copy(observations))
             self.returns_intrinsic = np.zeros(self.env.num_envs)
             self.returns_extrinsic = np.zeros(self.env.num_envs)
             self.valid_transition = np.ones(self.env.num_envs)
@@ -32,7 +35,8 @@ class IntrinsicRewardWrapper(VectorWrapper):
 
         # Calculate intrinsic rewards
         if self.active == True:
-            rewards_intrinsic = self.icm_mod.calc_reward(self.obs_prev, observations, actions, self.device)
+            obs_next = self.obs_transform(np.copy(observations))
+            rewards_intrinsic = self.icm_mod.calc_reward(self.obs_prev, obs_next, actions, self.device)
             rewards_intrinsic = self.valid_transition * rewards_intrinsic
             rewards_intrinsic = np.minimum(rewards_intrinsic, self.rew_icm_max)
 

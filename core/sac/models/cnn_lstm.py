@@ -195,7 +195,7 @@ class CNNLSTMActor(nn.Module):
         # Input is assumed to be always 5D
         if features is None: features = self.feature_ext(obs) 
         out = self.actor_head(features.flatten(0, 1))
-        mu, std = out[:, :self.act_dim], torch.exp(out[:, self.act_dim:])
+        mu, std = out[..., :self.act_dim], torch.exp(out[..., self.act_dim:])
         mu, std = mu.view(*features.shape[:2], self.act_dim), std.view(*features.shape[:2], self.act_dim)
         
         # Compute the actions 
@@ -277,7 +277,7 @@ class CNNLSTMActorCritic(nn.Module):
             q_val_2 = self.critic_2.forward(obs, act, features=features)
             q_val = torch.min(q_val_1, q_val_2)
         
-        return act.squeeze(1).cpu().numpy(), q_val.cpu().numpy().squeeze()
+        return act.squeeze(1).cpu().numpy(), q_val.cpu().numpy().squeeze((1, 2))
 
     def act(self, obs, deterministic=False):
         with torch.no_grad():

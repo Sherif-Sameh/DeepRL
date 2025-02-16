@@ -98,7 +98,7 @@ class MLPActor(MLP):
     def forward(self, obs, deterministic=False):
         # Input is assumed to be always 2D
         out = self.net(obs)
-        mu, std = out[:, :self.act_dim], torch.exp(out[:, self.act_dim:])
+        mu, std = out[..., :self.act_dim], torch.exp(out[..., self.act_dim:])
         
         # Compute the actions 
         if deterministic:
@@ -160,7 +160,7 @@ class MLPActorCritic(nn.Module):
             q_val_2 = self.critic_2.forward(obs, act)
             q_val = torch.min(q_val_1, q_val_2)
 
-        return act.cpu().numpy(), q_val.cpu().numpy().squeeze()
+        return act.cpu().numpy(), q_val.cpu().numpy().squeeze(1)
     
     def act(self, obs, deterministic=False):
         with torch.no_grad():
