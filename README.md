@@ -79,9 +79,8 @@ https://doi.org/10.48550/arXiv.1705.05363))
 https://doi.org/10.48550/arXiv.1707.01495
 ))
 
-* To do:
-	* Adaptive Policy ReguLarization ([APRL](	
-	https://doi.org/10.48550/arXiv.2310.17634)) 
+* Adaptive Policy ReguLarization ([APRL](	
+https://doi.org/10.48550/arXiv.2310.17634)) 
 	
 ## Hierarchical RL 
 
